@@ -1,0 +1,1315 @@
+package com.nttdocomo.ui;
+
+public class Graphics {
+    public static final int BLACK = 0;
+    public static final int BLUE = 1;
+    public static final int LIME = 2;
+    public static final int AQUA = 3;
+    public static final int RED = 4;
+    public static final int FUCHSIA = 5;
+    public static final int YELLOW = 6;
+    public static final int WHITE = 7;
+    public static final int GRAY = 8;
+    public static final int NAVY = 9;
+    public static final int GREEN = 10;
+    public static final int TEAL = 11;
+    public static final int MAROON = 12;
+    public static final int PURPLE = 13;
+    public static final int OLIVE = 14;
+    public static final int SILVER = 15;
+
+    public static final int FLIP_NONE = 0;
+    public static final int FLIP_HORIZONTAL = 1;
+    public static final int FLIP_VERTICAL = 2;
+    public static final int FLIP_ROTATE = 3;
+    public static final int FLIP_ROTATE_LEFT = 4;
+    public static final int FLIP_ROTATE_RIGHT = 5;
+    public static final int FLIP_ROTATE_RIGHT_HORIZONTAL = 6;
+    public static final int FLIP_ROTATE_RIGHT_VERTICAL = 7;
+
+    protected javax.microedition.lcdui.Graphics midpGraphics;
+    protected javax.microedition.lcdui.Image backBuffer;
+    protected Canvas parentCanvas;
+    protected int screenWidth;
+    protected int screenHeight;
+    private int currentARGB = 0xFF000000;
+    private int originX;
+    private int originY;
+    private int flipMode;
+    private Font currentFont;
+    protected int renderMode = 0;
+    protected int srcRatio = 255;
+    protected int dstRatio = 255;
+    private int lockCount;
+    private boolean presenting;
+    private int[] fillScratch;
+    private int[] pixelScratch;
+    private int[] blendScratch;
+    private int[] polygonScratch;
+    private int[] solidCompositeLut;
+    private int solidLutSource;
+    private int solidLutMode;
+    private int solidLutSrcRatio;
+    private int solidLutDstRatio;
+    private boolean solidLutValid;
+    private javax.microedition.lcdui.Image textMaskImage;
+    private javax.microedition.lcdui.Graphics textMaskGraphics;
+    private int textMaskWidth;
+    private int textMaskHeight;
+    private int[] textMaskPixels;
+    private static final int COMPOSITE_PIXELS = 4096;
+    private static final int SOLID_COMPOSITE_PIXELS = 16384;
+
+    // 預先計算 0 到 90 度的 Sine 定點數表（Q30 格式）。
+    // 其餘象限的角度，可以利用正弦函數的對稱性補齊：Cosine 直接加 90 度就能複用該表。
+    // 這可以避免昂貴的浮點運算。
+    private static final int[] SIN_Q30_0_90 = {
+        0, 18739379, 37473049, 56195305, 74900443, 93582766, 112236583, 130856211,
+        149435979, 167970228, 186453311, 204879599, 223243478, 241539355, 259761657, 277904834,
+        295963357, 313931728, 331804471, 349576144, 367241333, 384794656, 402230767, 419544355,
+        436730145, 453782903, 470697435, 487468587, 504091252, 520560366, 536870912, 553017922,
+        568996477, 584801711, 600428808, 615873009, 631129609, 646193961, 661061475, 675727625,
+        690187940, 704438018, 718473518, 732290163, 745883746, 759250125, 772385229, 785285058,
+        797945680, 810363241, 822533958, 834454122, 846120104, 857528349, 868675383, 879557810,
+        890172315, 900515665, 910584710, 920376381, 929887697, 939115760, 948057759, 956710970,
+        965072759, 973140576, 980911966, 988384560, 995556083, 1002424350, 1008987269, 1015242840,
+        1021189159, 1026824413, 1032146887, 1037154959, 1041847103, 1046221891, 1050277989, 1054014162,
+        1057429273, 1060522280, 1063292242, 1065738315, 1067859754, 1069655912, 1071126243, 1072270298,
+        1073087729, 1073578288, 1073741824
+    };
+
+    private static int sinQ30(int angle) {
+        if (angle <= 90) return SIN_Q30_0_90[angle];
+        if (angle <= 180) return SIN_Q30_0_90[180 - angle];
+        if (angle <= 270) return -SIN_Q30_0_90[angle - 180];
+        return -SIN_Q30_0_90[360 - angle];
+    }
+
+    private static int cosQ30(int angle) {
+        int shifted = angle + 90;
+        if (shifted >= 360) shifted -= 360;
+        return sinQ30(shifted);
+    }
+
+    public Graphics() {
+    }
+
+    public void init(int width, int height) {
+        if (width <= 0) width = 240;
+        if (height <= 0) height = 240;
+        screenWidth = width;
+        screenHeight = height;
+        backBuffer = javax.microedition.lcdui.Image.createImage(width, height);
+        midpGraphics = backBuffer.getGraphics();
+        originX = 0;
+        originY = 0;
+        lockCount = 0;
+        presenting = false;
+        setColor(currentARGB);
+        if (currentFont != null) setFont(currentFont);
+    }
+
+    void init(javax.microedition.lcdui.Image mutableImage) {
+        backBuffer = mutableImage;
+        midpGraphics = mutableImage.getGraphics();
+        screenWidth = mutableImage.getWidth();
+        screenHeight = mutableImage.getHeight();
+        originX = 0;
+        originY = 0;
+        lockCount = 0;
+        presenting = false;
+        setColor(currentARGB);
+        if (currentFont != null) setFont(currentFont);
+    }
+
+    protected void ensureSurface() {
+        if (midpGraphics != null) return;
+        int width = screenWidth;
+        int height = screenHeight;
+        if (parentCanvas != null) {
+            int canvasWidth = parentCanvas.getWidth();
+            int canvasHeight = parentCanvas.getHeight();
+            if (canvasWidth > 0) width = canvasWidth;
+            if (canvasHeight > 0) height = canvasHeight;
+        }
+        if (width <= 0) width = 240;
+        if (height <= 0) height = 240;
+        init(width, height);
+    }
+
+    public javax.microedition.lcdui.Graphics getMIDPGraphics() {
+        ensureSurface();
+        return midpGraphics;
+    }
+
+    public javax.microedition.lcdui.Image getBackBuffer() {
+        ensureSurface();
+        return backBuffer;
+    }
+
+    void paintDisplay(javax.microedition.lcdui.Graphics g) {
+        ensureSurface();
+        synchronized (this) {
+            while (lockCount != 0) {
+                try { wait(); } catch (InterruptedException ignored) {}
+            }
+            g.drawImage(backBuffer, 0, 0,
+                javax.microedition.lcdui.Graphics.TOP | javax.microedition.lcdui.Graphics.LEFT);
+        }
+    }
+
+    public void lock() {
+        ensureSurface();
+        synchronized (this) {
+            while (presenting) {
+                try { wait(); } catch (InterruptedException ignored) {}
+            }
+            lockCount++;
+        }
+    }
+
+    public void unlock(boolean forced) {
+        ensureSurface();
+        boolean present = false;
+        synchronized (this) {
+            if (lockCount == 0) return;
+            if (forced) {
+                lockCount = 0;
+                present = parentCanvas != null;
+            } else {
+                lockCount--;
+                present = lockCount == 0 && parentCanvas != null;
+            }
+            if (present) presenting = true;
+            notifyAll();
+        }
+        if (!present) return;
+        try {
+            parentCanvas.__midpPresent();
+        } finally {
+            synchronized (this) {
+                presenting = false;
+                notifyAll();
+            }
+        }
+    }
+
+    public static int getColorOfRGB(int r, int g, int b) {
+        return 0xFF000000 | ((r & 0xFF) << 16) | ((g & 0xFF) << 8) | (b & 0xFF);
+    }
+
+    public static int getColorOfRGB(int r, int g, int b, int a) {
+        return ((a & 0xFF) << 24) | ((r & 0xFF) << 16) | ((g & 0xFF) << 8) | (b & 0xFF);
+    }
+
+    public static int getColorOfName(int name) {
+        switch (name) {
+            case BLACK: return getColorOfRGB(0x00, 0x00, 0x00);
+            case BLUE: return getColorOfRGB(0x00, 0x00, 0xFF);
+            case LIME: return getColorOfRGB(0x00, 0xFF, 0x00);
+            case AQUA: return getColorOfRGB(0x00, 0xFF, 0xFF);
+            case RED: return getColorOfRGB(0xFF, 0x00, 0x00);
+            case FUCHSIA: return getColorOfRGB(0xFF, 0x00, 0xFF);
+            case YELLOW: return getColorOfRGB(0xFF, 0xFF, 0x00);
+            case WHITE: return getColorOfRGB(0xFF, 0xFF, 0xFF);
+            case GRAY: return getColorOfRGB(0x80, 0x80, 0x80);
+            case NAVY: return getColorOfRGB(0x00, 0x00, 0x80);
+            case GREEN: return getColorOfRGB(0x00, 0x80, 0x00);
+            case TEAL: return getColorOfRGB(0x00, 0x80, 0x80);
+            case MAROON: return getColorOfRGB(0x80, 0x00, 0x00);
+            case PURPLE: return getColorOfRGB(0x80, 0x00, 0x80);
+            case OLIVE: return getColorOfRGB(0x80, 0x80, 0x00);
+            case SILVER: return getColorOfRGB(0xC0, 0xC0, 0xC0);
+            default: return getColorOfRGB(0, 0, 0);
+        }
+    }
+
+    public void setColor(int argb) {
+        ensureSurface();
+        /* 
+         * 處理 DoJa 顏色格式：當傳入的 32bit ARGB 未指定 Alpha 時，預設視為不透明色。
+         * 特定的渲染模式中，透明度則留待繪製階段再另外計算 & 使用。
+         */
+        if ((argb & 0xFF000000) == 0) {
+            argb = 0xFF000000 | (argb & 0x00FFFFFF);
+        }
+        currentARGB = argb;
+        midpGraphics.setColor(argb & 0x00FFFFFF);
+    }
+
+    protected void setRenderModeState(int operator, int sourceRatio, int destinationRatio) {
+        if (operator < 0 || operator > 2) throw new IllegalArgumentException("invalid raster operator");
+        if (sourceRatio < 0 || sourceRatio > 255 || destinationRatio < 0 || destinationRatio > 255) {
+            throw new IllegalArgumentException("raster ratio out of range");
+        }
+        renderMode = operator;
+        srcRatio = sourceRatio;
+        dstRatio = destinationRatio;
+    }
+
+    protected int getEffectiveAlpha(int objectAlpha) {
+        int a = objectAlpha < 0 ? 0 : (objectAlpha > 255 ? 255 : objectAlpha);
+        int colorAlpha = (currentARGB >>> 24) & 0xFF;
+        return colorAlpha < a ? colorAlpha : a;
+    }
+
+    protected int getOriginX() { return originX; }
+    protected int getOriginY() { return originY; }
+
+    public void setFont(Font font) {
+        ensureSurface();
+        currentFont = font;
+        if (font != null) {
+            midpGraphics.setFont(font.getMIDPFont());
+        }
+    }
+
+    public void setClip(int x, int y, int width, int height) {
+        ensureSurface();
+        midpGraphics.setClip(x, y, width, height);
+    }
+
+    public void clearClip() {
+        ensureSurface();
+        midpGraphics.setClip(-originX, -originY, screenWidth, screenHeight);
+    }
+
+    public void clipRect(int x, int y, int width, int height) {
+        ensureSurface();
+        midpGraphics.clipRect(x, y, width, height);
+    }
+
+    public void setOrigin(int x, int y) {
+        ensureSurface();
+        midpGraphics.translate(x - originX, y - originY);
+        originX = x;
+        originY = y;
+    }
+
+    public void setFlipMode(int mode) {
+        flipMode = mode;
+    }
+
+    public void drawImage(Image img, int[] matrix) {
+        if (matrix == null || matrix.length < 6 || img == null) return;
+        drawImage(img, matrix[4], matrix[5], 0, 0, img.getWidth(), img.getHeight());
+    }
+
+    public void drawImage(Image img, int[] matrix, int sx, int sy, int width, int height) {
+        if (matrix == null || matrix.length < 6) return;
+        drawImage(img, matrix[4], matrix[5], sx, sy, width, height);
+    }
+
+    public void drawImage(Image img, int x, int y) {
+        if (img == null) return;
+        drawImage(img, x, y, 0, 0, img.getWidth(), img.getHeight());
+    }
+
+    public void drawImage(Image img, int dx, int dy, int sx, int sy, int width, int height) {
+        drawUnscaledSubImage(img, dx, dy, sx, sy, width, height);
+    }
+
+    public void drawScaledImage(Image img, int dx, int dy, int dw, int dh, int sx, int sy, int sw, int sh) {
+        drawSubImage(img, dx, dy, sx, sy, sw, sh, dw, dh);
+    }
+
+    /**
+     * 處理無縮放的子圖繪製（DoJa 語義）
+     * DoJa 的 drawImage() 採用 1:1 像素映射。當指定的來源矩形超出圖片實際邊界時，
+     * 僅繪製相交的『有效區域』，絕不將剩餘像素強制拉伸填滿請求尺寸，避免貼邊 Sprite 發生變形。
+     */
+    private void drawUnscaledSubImage(Image img, int dx, int dy, int sx, int sy, int width, int height) {
+        if (img == null || width <= 0 || height <= 0) return;
+        int imgW = img.getWidth();
+        int imgH = img.getHeight();
+
+        long requestedRight = (long)sx + (long)width;
+        long requestedBottom = (long)sy + (long)height;
+        int clippedX = sx < 0 ? 0 : sx;
+        int clippedY = sy < 0 ? 0 : sy;
+        int clippedRight = requestedRight > imgW ? imgW : (int)requestedRight;
+        int clippedBottom = requestedBottom > imgH ? imgH : (int)requestedBottom;
+        if (clippedX >= clippedRight || clippedY >= clippedBottom) return;
+
+        int clippedW = clippedRight - clippedX;
+        int clippedH = clippedBottom - clippedY;
+        int relX = clippedX - sx;
+        int relY = clippedY - sy;
+        int outX = dx;
+        int outY = dy;
+
+        /**
+         * 當來源圖片經過裁切後，目的座標依然先依「未裁切的完整尺寸」進行計算，之後再將繪製範圍對齊至剩餘的實際交集區域，並施加矩陣變換。
+         * 這樣可以確保 Sprite 在貼邊翻轉時，畫面邊界與錨點依然正確，不會發生位置跳躍。
+         */
+        switch (flipMode) {
+            case FLIP_HORIZONTAL:
+                outX += width - relX - clippedW;
+                outY += relY;
+                break;
+            case FLIP_VERTICAL:
+                outX += relX;
+                outY += height - relY - clippedH;
+                break;
+            case FLIP_ROTATE:
+                outX += width - relX - clippedW;
+                outY += height - relY - clippedH;
+                break;
+            case FLIP_ROTATE_LEFT:
+                outX += relY;
+                outY += width - relX - clippedW;
+                break;
+            case FLIP_ROTATE_RIGHT:
+                outX += height - relY - clippedH;
+                outY += relX;
+                break;
+            case FLIP_ROTATE_RIGHT_HORIZONTAL:
+                outX += relY;
+                outY += relX;
+                break;
+            case FLIP_ROTATE_RIGHT_VERTICAL:
+                outX += height - relY - clippedH;
+                outY += width - relX - clippedW;
+                break;
+            default:
+                outX += relX;
+                outY += relY;
+                break;
+        }
+
+        drawSubImage(img, outX, outY, clippedX, clippedY,
+            clippedW, clippedH, clippedW, clippedH);
+    }
+
+    private void drawSubImage(Image img, int dx, int dy, int sx, int sy, int sw, int sh, int dw, int dh) {
+        ensureSurface();
+        if (img == null) return;
+        if (sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0) return;
+        int imageAlpha = img.getAlpha();
+        if (imageAlpha <= 0) return;
+        int imgW = img.getWidth();
+        int imgH = img.getHeight();
+        if (sx < 0) { sw += sx; sx = 0; }
+        if (sy < 0) { sh += sy; sy = 0; }
+        if (sx + sw > imgW) sw = imgW - sx;
+        if (sy + sh > imgH) sh = imgH - sy;
+        if (sw <= 0 || sh <= 0) return;
+
+        javax.microedition.lcdui.Image src = img.getMIDPImage();
+        if (src == null) return;
+        if (renderMode == 0 && imageAlpha >= 255 && sw == dw && sh == dh) {
+            if (flipMode == FLIP_NONE) {
+                int cx = midpGraphics.getClipX();
+                int cy = midpGraphics.getClipY();
+                int cw = midpGraphics.getClipWidth();
+                int ch = midpGraphics.getClipHeight();
+                midpGraphics.clipRect(dx, dy, dw, dh);
+                midpGraphics.drawImage(src, dx - sx, dy - sy,
+                    javax.microedition.lcdui.Graphics.TOP | javax.microedition.lcdui.Graphics.LEFT);
+                midpGraphics.setClip(cx, cy, cw, ch);
+                return;
+            }
+            try {
+                midpGraphics.drawRegion(src, sx, sy, sw, sh, toMIDPTransform(flipMode), dx, dy,
+                    javax.microedition.lcdui.Graphics.TOP | javax.microedition.lcdui.Graphics.LEFT);
+                return;
+            } catch (Throwable ignored) {
+                // 有些 MIDP 的 drawRegion 會直接失敗；改走下面的小 buffer 路徑，至少結果仍可預期。
+            }
+        }
+
+        drawNativeStreaming(src, img, dx, dy, sx, sy, sw, sh, dw, dh);
+    }
+
+    private void drawNativeStreaming(javax.microedition.lcdui.Image src, Image image,
+            int dx, int dy, int sx, int sy, int sw, int sh, int dw, int dh) {
+        boolean rotated = isRotated(flipMode);
+        int outW = rotated ? dh : dw;
+        int outH = rotated ? dw : dh;
+        if (outW <= 0 || outH <= 0 || sw <= 0 || sh <= 0) return;
+        int imageAlpha = image.getAlpha();
+        boolean colourKey = image.isTransparentEnabled();
+        int transparent = image.getTransparentColor() & 0x00ffffff;
+
+        /* 
+         * drawImage() 是系統常見的效能熱點，因此改為一次搬移一整條切片，同時將暫存緩衝區控制在 4096 像素內。
+         * 在無縮放的情形下，每個切片僅需三次跨越 Java 與 MIDP 的介面呼叫，效率遠高於逐列進行 getRGB/drawRGB 操作。
+         */
+        if (sw == dw && sh == dh && outW <= COMPOSITE_PIXELS) {
+            drawUnscaledBuffered(src, dx, dy, sx, sy, sw, sh,
+                    imageAlpha, colourKey, transparent, rotated);
+            return;
+        }
+
+        long sourcePixels = (long)sw * (long)sh;
+        if (sourcePixels <= COMPOSITE_PIXELS && outW <= COMPOSITE_PIXELS) {
+            drawScaledBuffered(src, dx, dy, sx, sy, sw, sh, dw, dh,
+                    imageAlpha, colourKey, transparent, rotated);
+            return;
+        }
+
+        /* 大型縮放塞不進固定工作區時改成逐列串流，使用慢速減少 JVM RAM 開銷。*/
+        ensureScratch(outW);
+        ensurePixelScratch(sw > sh ? sw : sh);
+        for (int outY = 0; outY < outH; outY++) {
+            if (!rotated) {
+                int preY = (flipMode == FLIP_VERTICAL || flipMode == FLIP_ROTATE)
+                    ? dh - 1 - outY : outY;
+                int sourceY = sy + preY * sh / dh;
+                src.getRGB(pixelScratch, 0, sw, sx, sourceY, sw, 1);
+                for (int outX = 0; outX < outW; outX++) {
+                    int preX = (flipMode == FLIP_HORIZONTAL || flipMode == FLIP_ROTATE)
+                        ? dw - 1 - outX : outX;
+                    int pixel = pixelScratch[preX * sw / dw];
+                    fillScratch[outX] = applyImageAlpha(pixel, imageAlpha, colourKey, transparent);
+                }
+            } else {
+                int preX;
+                switch (flipMode) {
+                    case FLIP_ROTATE_LEFT:
+                    case FLIP_ROTATE_RIGHT_VERTICAL:
+                        preX = dw - 1 - outY; break;
+                    default:
+                        preX = outY; break;
+                }
+                int sourceX = sx + preX * sw / dw;
+                src.getRGB(pixelScratch, 0, 1, sourceX, sy, 1, sh);
+                for (int outX = 0; outX < outW; outX++) {
+                    int preY;
+                    switch (flipMode) {
+                        case FLIP_ROTATE_RIGHT:
+                        case FLIP_ROTATE_RIGHT_VERTICAL:
+                            preY = dh - 1 - outX; break;
+                        default:
+                            preY = outX; break;
+                    }
+                    int pixel = pixelScratch[preY * sh / dh];
+                    fillScratch[outX] = applyImageAlpha(pixel, imageAlpha, colourKey, transparent);
+                }
+            }
+            drawRGBComposite(fillScratch, 0, outW, dx, dy + outY, outW, 1, true);
+        }
+    }
+
+    private void drawUnscaledBuffered(javax.microedition.lcdui.Image src,
+            int dx, int dy, int sx, int sy, int sw, int sh,
+            int imageAlpha, boolean colourKey, int transparent, boolean rotated) {
+        int outW = rotated ? sh : sw;
+        int outH = rotated ? sw : sh;
+        int rowsPerBlock = COMPOSITE_PIXELS / outW;
+        if (rowsPerBlock < 1) rowsPerBlock = 1;
+
+        for (int outY = 0; outY < outH; outY += rowsPerBlock) {
+            int bh = outH - outY;
+            if (bh > rowsPerBlock) bh = rowsPerBlock;
+            int count = outW * bh;
+            ensureScratch(count);
+            ensurePixelScratch(count);
+
+            if (!rotated) {
+                boolean reverseY = flipMode == FLIP_VERTICAL || flipMode == FLIP_ROTATE;
+                boolean reverseX = flipMode == FLIP_HORIZONTAL || flipMode == FLIP_ROTATE;
+                int sourceY = reverseY ? sy + sh - outY - bh : sy + outY;
+                src.getRGB(pixelScratch, 0, sw, sx, sourceY, sw, bh);
+                for (int ry = 0; ry < bh; ry++) {
+                    int sourceRow = (reverseY ? bh - 1 - ry : ry) * sw;
+                    int outRow = ry * outW;
+                    for (int ox = 0; ox < outW; ox++) {
+                        int sourceX = reverseX ? sw - 1 - ox : ox;
+                        int pixel = pixelScratch[sourceRow + sourceX];
+                        fillScratch[outRow + ox] = applyImageAlpha(
+                                pixel, imageAlpha, colourKey, transparent);
+                    }
+                }
+            } else {
+                boolean reverseSourceX = flipMode == FLIP_ROTATE_LEFT
+                        || flipMode == FLIP_ROTATE_RIGHT_VERTICAL;
+                boolean reverseSourceY = flipMode == FLIP_ROTATE_RIGHT
+                        || flipMode == FLIP_ROTATE_RIGHT_VERTICAL;
+                int sourceX = reverseSourceX ? sx + sw - outY - bh : sx + outY;
+                src.getRGB(pixelScratch, 0, bh, sourceX, sy, bh, sh);
+                for (int ry = 0; ry < bh; ry++) {
+                    int sourceColumn = reverseSourceX ? bh - 1 - ry : ry;
+                    int outRow = ry * outW;
+                    for (int ox = 0; ox < outW; ox++) {
+                        int sourceY = reverseSourceY ? sh - 1 - ox : ox;
+                        int pixel = pixelScratch[sourceY * bh + sourceColumn];
+                        fillScratch[outRow + ox] = applyImageAlpha(
+                                pixel, imageAlpha, colourKey, transparent);
+                    }
+                }
+            }
+            drawRGBComposite(fillScratch, 0, outW, dx, dy + outY, outW, bh, true);
+        }
+    }
+
+    private void drawScaledBuffered(javax.microedition.lcdui.Image src,
+            int dx, int dy, int sx, int sy, int sw, int sh, int dw, int dh,
+            int imageAlpha, boolean colourKey, int transparent, boolean rotated) {
+        int sourceCount = sw * sh;
+        ensurePixelScratch(sourceCount);
+        src.getRGB(pixelScratch, 0, sw, sx, sy, sw, sh);
+
+        int outW = rotated ? dh : dw;
+        int outH = rotated ? dw : dh;
+        int rowsPerBlock = COMPOSITE_PIXELS / outW;
+        if (rowsPerBlock < 1) rowsPerBlock = 1;
+
+        for (int outY = 0; outY < outH; outY += rowsPerBlock) {
+            int bh = outH - outY;
+            if (bh > rowsPerBlock) bh = rowsPerBlock;
+            int count = outW * bh;
+            ensureScratch(count);
+            for (int ry = 0; ry < bh; ry++) {
+                int gy = outY + ry;
+                int outRow = ry * outW;
+                if (!rotated) {
+                    int preY = (flipMode == FLIP_VERTICAL || flipMode == FLIP_ROTATE)
+                            ? dh - 1 - gy : gy;
+                    int sourceY = preY * sh / dh;
+                    for (int ox = 0; ox < outW; ox++) {
+                        int preX = (flipMode == FLIP_HORIZONTAL || flipMode == FLIP_ROTATE)
+                                ? dw - 1 - ox : ox;
+                        int sourceX = preX * sw / dw;
+                        int pixel = pixelScratch[sourceY * sw + sourceX];
+                        fillScratch[outRow + ox] = applyImageAlpha(
+                                pixel, imageAlpha, colourKey, transparent);
+                    }
+                } else {
+                    int preX;
+                    switch (flipMode) {
+                        case FLIP_ROTATE_LEFT:
+                        case FLIP_ROTATE_RIGHT_VERTICAL:
+                            preX = dw - 1 - gy; break;
+                        default:
+                            preX = gy; break;
+                    }
+                    int sourceX = preX * sw / dw;
+                    for (int ox = 0; ox < outW; ox++) {
+                        int preY;
+                        switch (flipMode) {
+                            case FLIP_ROTATE_RIGHT:
+                            case FLIP_ROTATE_RIGHT_VERTICAL:
+                                preY = dh - 1 - ox; break;
+                            default:
+                                preY = ox; break;
+                        }
+                        int sourceY = preY * sh / dh;
+                        int pixel = pixelScratch[sourceY * sw + sourceX];
+                        fillScratch[outRow + ox] = applyImageAlpha(
+                                pixel, imageAlpha, colourKey, transparent);
+                    }
+                }
+            }
+            drawRGBComposite(fillScratch, 0, outW, dx, dy + outY, outW, bh, true);
+        }
+    }
+
+    protected int prepareImagePixel(Image image, int pixel) {
+        if (image == null) return 0;
+        return applyImageAlpha(pixel, image.getAlpha(), image.isTransparentEnabled(),
+                image.getTransparentColor() & 0x00FFFFFF);
+    }
+
+    protected void drawRGBReplacement(int[] rgb, int offset, int scanlength, int x, int y,
+            int width, int height, boolean processAlpha) {
+        int oldMode = renderMode;
+        int oldSrc = srcRatio;
+        int oldDst = dstRatio;
+        renderMode = 0; srcRatio = 255; dstRatio = 255;
+        try { drawRGBComposite(rgb, offset, scanlength, x, y, width, height, processAlpha); }
+        finally { renderMode = oldMode; srcRatio = oldSrc; dstRatio = oldDst; }
+    }
+
+    private static int applyImageAlpha(int pixel, int imageAlpha,
+            boolean colourKey, int transparent) {
+        int rgb = pixel & 0x00ffffff;
+        int alpha = (pixel >>> 24) & 0xff;
+        if (colourKey && rgb == transparent) alpha = 0;
+        if (imageAlpha < 255) alpha = (multiplyU8(alpha, imageAlpha) + 127) / 255;
+        return rgb | (alpha << 24);
+    }
+
+    private void ensurePixelScratch(int size) {
+        if (pixelScratch == null || pixelScratch.length < size) {
+            pixelScratch = new int[size];
+        }
+    }
+
+    private static int toMIDPTransform(int mode) {
+        switch (mode) {
+            case FLIP_HORIZONTAL: return 2;              // MIDP TRANS_MIRROR
+            case FLIP_VERTICAL: return 1;                // MIDP TRANS_MIRROR_ROT180
+            case FLIP_ROTATE: return 3;                  // MIDP TRANS_ROT180
+            case FLIP_ROTATE_LEFT: return 6;             // MIDP TRANS_ROT270
+            case FLIP_ROTATE_RIGHT: return 5;            // MIDP TRANS_ROT90
+            case FLIP_ROTATE_RIGHT_HORIZONTAL: return 4; // MIDP TRANS_MIRROR_ROT270
+            case FLIP_ROTATE_RIGHT_VERTICAL: return 7;   // MIDP TRANS_MIRROR_ROT90
+            default: return 0;                           // MIDP TRANS_NONE
+        }
+    }
+
+    private static boolean isRotated(int mode) {
+        return mode == FLIP_ROTATE_LEFT || mode == FLIP_ROTATE_RIGHT || mode == FLIP_ROTATE_RIGHT_HORIZONTAL || mode == FLIP_ROTATE_RIGHT_VERTICAL;
+    }
+
+    public void drawString(String str, int x, int y) {
+        ensureSurface();
+        if (str == null) str = "";
+        if (BitmapFont.isLoaded()) {
+            int alpha = getEffectiveAlpha(255);
+            int argb = (currentARGB & 0x00FFFFFF) | (alpha << 24);
+            if (BitmapFont.drawString(this, str, x, y, argb, currentFont)) {
+                return;
+            }
+        }
+        int alpha = getEffectiveAlpha(255);
+        if (renderMode == 0 && alpha == 255) {
+            int yy = y;
+            if (currentFont != null) yy += currentFont.getBaselineShift();
+            midpGraphics.drawString(str, x, yy,
+                    javax.microedition.lcdui.Graphics.BASELINE | javax.microedition.lcdui.Graphics.LEFT);
+            return;
+        }
+        drawNativeTextComposite(str, x, y, alpha);
+    }
+
+    /** 先把 MIDP 字型畫成單色 mask，再進行 DoJa 混合；複合模式因此和圖片路徑一致。 */
+    private void drawNativeTextComposite(String str, int x, int y, int alpha) {
+        if (str.length() == 0) return;
+        javax.microedition.lcdui.Font mf = currentFont == null
+                ? javax.microedition.lcdui.Font.getDefaultFont() : currentFont.getMIDPFont();
+        int w = mf.stringWidth(str);
+        int h = mf.getHeight();
+        if (w <= 0 || h <= 0) return;
+        ensureTextMask(w, h);
+        textMaskGraphics.setColor(0x000000);
+        textMaskGraphics.fillRect(0, 0, textMaskWidth, textMaskHeight);
+        textMaskGraphics.setFont(mf);
+        textMaskGraphics.setColor(0xFFFFFF);
+        int baseline = mf.getBaselinePosition();
+        textMaskGraphics.drawString(str, 0, baseline,
+                javax.microedition.lcdui.Graphics.BASELINE | javax.microedition.lcdui.Graphics.LEFT);
+        int count = w * h;
+        if (textMaskPixels == null || textMaskPixels.length < count) textMaskPixels = new int[count];
+        textMaskImage.getRGB(textMaskPixels, 0, w, 0, 0, w, h);
+        int rgb = currentARGB & 0x00FFFFFF;
+        for (int i = 0; i < count; i++) {
+            int p = textMaskPixels[i];
+            int coverage = (((p >>> 16) & 255) + ((p >>> 8) & 255) + (p & 255)) / 3;
+            textMaskPixels[i] = rgb | (((multiplyU8(coverage, alpha) + 127) / 255) << 24);
+        }
+        int baselineShift = currentFont == null ? 0 : currentFont.getBaselineShift();
+        drawRGBComposite(textMaskPixels, 0, w, x, y + baselineShift - baseline, w, h, true);
+    }
+
+    private void ensureTextMask(int w, int h) {
+        if (textMaskImage != null && textMaskWidth >= w && textMaskHeight >= h) return;
+        textMaskWidth = w;
+        textMaskHeight = h;
+        textMaskImage = javax.microedition.lcdui.Image.createImage(w, h);
+        textMaskGraphics = textMaskImage.getGraphics();
+    }
+
+    public void drawChars(char[] data, int x, int y, int off, int len) {
+        if (data == null || len <= 0) return;
+        drawString(new String(data, off, len), x, y);
+    }
+
+    public void setPictoColorEnabled(boolean b) {
+        /* DoJa 裝置間的 pictogram 顏色不同，MIDP 沿用目前文字色即可。 */
+    }
+
+    public void drawLine(int x1, int y1, int x2, int y2) {
+        ensureSurface();
+        if (renderMode == 0 && ((currentARGB >>> 24) & 0xFF) == 255) {
+            midpGraphics.drawLine(x1, y1, x2, y2);
+            return;
+        }
+        rasterLine(x1, y1, x2, y2, currentARGB);
+    }
+
+    public void drawPolyline(int[] xPoints, int[] yPoints, int nPoints) {
+        drawPolyline(xPoints, yPoints, 0, nPoints);
+    }
+
+    public void drawPolyline(int[] xPoints, int[] yPoints, int offset, int count) {
+        ensureSurface();
+        if (xPoints == null || yPoints == null || count < 2) return;
+        for (int i = offset; i < offset + count - 1; i++) {
+            drawLine(xPoints[i], yPoints[i], xPoints[i + 1], yPoints[i + 1]);
+        }
+    }
+
+    public void drawRect(int x, int y, int w, int h) {
+        ensureSurface();
+        if (w < 0 || h < 0) return;
+        if (renderMode == 0 && ((currentARGB >>> 24) & 0xFF) == 255) {
+            midpGraphics.drawRect(x, y, w, h);
+            return;
+        }
+        drawLine(x, y, x + w, y);
+        if (h != 0) drawLine(x, y + h, x + w, y + h);
+        if (h > 1) {
+            drawLine(x, y + 1, x, y + h - 1);
+            if (w != 0) drawLine(x + w, y + 1, x + w, y + h - 1);
+        }
+    }
+
+    public void fillRect(int x, int y, int w, int h) {
+        ensureSurface();
+        if (w <= 0 || h <= 0) return;
+        int alpha = (currentARGB >>> 24) & 0xFF;
+        if (renderMode == 0 && alpha == 255) {
+            midpGraphics.fillRect(x, y, w, h);
+            return;
+        }
+        fillSolid(x, y, w, h, currentARGB);
+    }
+
+    public void clearRect(int x, int y, int w, int h) {
+        ensureSurface();
+        if (w <= 0 || h <= 0) return;
+        int background = parentCanvas == null
+                ? getColorOfName(BLACK) : parentCanvas.getBackground();
+        if (renderMode == 0) {
+            int old = currentARGB;
+            setColor(background);
+            midpGraphics.fillRect(x, y, w, h);
+            setColor(old);
+        } else {
+            fillSolid(x, y, w, h, background);
+        }
+    }
+
+    public void copyArea(int sx, int sy, int width, int height, int dx, int dy) {
+        ensureSurface();
+        if (width <= 0 || height <= 0) return;
+        int dstX = sx + dx;
+        int dstY = sy + dy;
+        if (renderMode == 0) {
+            try {
+                midpGraphics.copyArea(sx, sy, width, height, dstX, dstY,
+                    javax.microedition.lcdui.Graphics.TOP | javax.microedition.lcdui.Graphics.LEFT);
+                return;
+            } catch (Throwable ignored) {
+                // 裝置端轉換失敗時，下面的 software path 會給出同一套結果。
+            }
+        }
+        copyAreaSoftware(sx, sy, width, height, dstX, dstY);
+    }
+
+    public void setPixel(int x, int y) {
+        ensureSurface();
+        rasterPixel(x, y, currentARGB);
+    }
+
+    public void setPixel(int x, int y, int color) {
+        int old = currentARGB;
+        setColor(color);
+        setPixel(x, y);
+        setColor(old);
+    }
+
+    public void setRGBPixel(int x, int y, int pixel) {
+        ensureSurface();
+        rasterPixel(x, y, 0xFF000000 | (pixel & 0x00FFFFFF));
+    }
+
+    public int getPixel(int x, int y) {
+        ensureSurface();
+        if (pixelScratch == null) pixelScratch = new int[1];
+        if (backBuffer == null) return 0;
+        backBuffer.getRGB(pixelScratch, 0, 1, x + originX, y + originY, 1, 1);
+        return pixelScratch[0];
+    }
+
+    public int getRGBPixel(int x, int y) {
+        return getPixel(x, y) & 0x00FFFFFF;
+    }
+
+    public int[] getPixels(int x, int y, int width, int height, int[] pixels, int off) {
+        ensureSurface();
+        if (pixels == null) {
+            pixels = new int[off + width * height];
+        }
+        if (backBuffer == null) return pixels;
+        backBuffer.getRGB(pixels, off, width, x + originX, y + originY, width, height);
+        return pixels;
+    }
+
+    public int[] getRGBPixels(int x, int y, int width, int height, int[] pixels, int off) {
+        pixels = getPixels(x, y, width, height, pixels, off);
+        int i;
+        int count = width * height;
+        for (i = 0; i < count; i++) {
+            pixels[off + i] &= 0x00FFFFFF;
+        }
+        return pixels;
+    }
+
+    public void setPixels(int x, int y, int width, int height, int[] pixels, int off) {
+        ensureSurface();
+        if (pixels == null || width <= 0 || height <= 0) return;
+        drawRGBComposite(pixels, off, width, x, y, width, height, true);
+    }
+
+    public void setRGBPixels(int x, int y, int width, int height, int[] pixels, int off) {
+        ensureSurface();
+        if (pixels == null || width <= 0 || height <= 0) return;
+        drawRGBComposite(pixels, off, width, x, y, width, height, false);
+    }
+
+    public void drawRGB(int[] rgb, int offset, int scanlength, int x, int y, int width, int height, boolean processAlpha) {
+        ensureSurface();
+        drawRGBComposite(rgb, offset, scanlength, x, y, width, height, processAlpha);
+    }
+
+    protected void drawRGBComposite(int[] rgb, int offset, int scanlength, int x, int y, int width, int height, boolean processAlpha) {
+        ensureSurface();
+        if (rgb == null || width <= 0 || height <= 0) return;
+        if (renderMode == 0) {
+            midpGraphics.drawRGB(rgb, offset, scanlength, x, y, width, height, processAlpha);
+            return;
+        }
+        int clipX = midpGraphics.getClipX();
+        int clipY = midpGraphics.getClipY();
+        int clipR = clipX + midpGraphics.getClipWidth();
+        int clipB = clipY + midpGraphics.getClipHeight();
+        int left = x > clipX ? x : clipX;
+        int top = y > clipY ? y : clipY;
+        int right = x + width < clipR ? x + width : clipR;
+        int bottom = y + height < clipB ? y + height : clipB;
+        int physL = left + originX;
+        int physT = top + originY;
+        if (physL < 0) { left -= physL; physL = 0; }
+        if (physT < 0) { top -= physT; physT = 0; }
+        if (right + originX > screenWidth) right = screenWidth - originX;
+        if (bottom + originY > screenHeight) bottom = screenHeight - originY;
+        if (left >= right || top >= bottom) return;
+
+
+        /* 採用矩形 Tile 批次讀寫目標畫布，大幅降低逐列頻繁掃描 Java/MIDP 邊界的成本；
+         * 單一 Tile 的尺寸上限維持在 4096 PX，避免增加 JVM 開銷。 */
+        int blockW = right - left;
+        if (blockW > COMPOSITE_PIXELS) blockW = COMPOSITE_PIXELS;
+        int rowsPerBlock = COMPOSITE_PIXELS / blockW;
+        if (rowsPerBlock < 1) rowsPerBlock = 1;
+        int maxRows = bottom - top;
+        if (maxRows > rowsPerBlock) maxRows = rowsPerBlock;
+        ensureBlendScratch(blockW * maxRows);
+
+        for (int by = top; by < bottom; by += rowsPerBlock) {
+            int bh = bottom - by;
+            if (bh > rowsPerBlock) bh = rowsPerBlock;
+            for (int bx = left; bx < right; bx += blockW) {
+                int bw = right - bx;
+                if (bw > blockW) bw = blockW;
+                int px = bx + originX;
+                backBuffer.getRGB(blendScratch, 0, bw, px, by + originY, bw, bh);
+                for (int ry = 0; ry < bh; ry++) {
+                    int srcRow = offset + (by + ry - y) * scanlength + (bx - x);
+                    int dstRow = ry * bw;
+                    for (int col = 0; col < bw; col++) {
+                        int src = rgb[srcRow + col];
+                        if (!processAlpha) src = 0xFF000000 | (src & 0x00FFFFFF);
+                        int di = dstRow + col;
+                        blendScratch[di] = rasterPixelValue(src, blendScratch[di]);
+                    }
+                }
+                midpGraphics.drawRGB(blendScratch, 0, bw, bx, by, bw, bh, false);
+            }
+        }
+    }
+
+    private int rasterPixelValue(int src, int dst) {
+        int a = (src >>> 24) & 0xFF;
+        if (a == 0) return dst;
+        if (renderMode == 0) {
+            if (a >= 255) return 0xFF000000 | (src & 0x00FFFFFF);
+            int inv = 255 - a;
+            int r = (multiplyU8((src >>> 16) & 0xFF, a) + multiplyU8((dst >>> 16) & 0xFF, inv) + 127) / 255;
+            int g = (multiplyU8((src >>> 8) & 0xFF, a) + multiplyU8((dst >>> 8) & 0xFF, inv) + 127) / 255;
+            int b = (multiplyU8(src & 0xFF, a) + multiplyU8(dst & 0xFF, inv) + 127) / 255;
+            return 0xFF000000 | (r << 16) | (g << 8) | b;
+        }
+        int sr = (src >>> 16) & 0xFF;
+        int sg = (src >>> 8) & 0xFF;
+        int sb = src & 0xFF;
+        int dr = (dst >>> 16) & 0xFF;
+        int dg = (dst >>> 8) & 0xFF;
+        int db = dst & 0xFF;
+        int rr, rg, rb;
+        if (renderMode == 1) {
+            rr = (multiplyU8(sr, srcRatio) + multiplyU8(dr, dstRatio)) >> 8;
+            rg = (multiplyU8(sg, srcRatio) + multiplyU8(dg, dstRatio)) >> 8;
+            rb = (multiplyU8(sb, srcRatio) + multiplyU8(db, dstRatio)) >> 8;
+        } else {
+            rr = (multiplyU8(dr, dstRatio) - multiplyU8(sr, srcRatio)) >> 8;
+            rg = (multiplyU8(dg, dstRatio) - multiplyU8(sg, srcRatio)) >> 8;
+            rb = (multiplyU8(db, dstRatio) - multiplyU8(sb, srcRatio)) >> 8;
+        }
+        rr = clamp8(rr); rg = clamp8(rg); rb = clamp8(rb);
+        // DoJa ADD/SUB 把 alpha 當參與開關：透明像素跳過，其餘像素直接按 srcRatio/dstRatio 做 raster operation.
+        return 0xFF000000 | (rr << 16) | (rg << 8) | rb;
+    }
+
+    /**
+     * DoJa Graphics 的色彩合成大量使用 8-bit channel x 8-bit ratio/alpha，
+     * 而真機實際執行這種大於 signed-16 範圍的乘積時，會發生截斷，造成渲染的色偏。
+     * 解決方式：拆開 factor 的最高 bit 後運算。
+     * 結果：每次乘法都低於 32768，最終結果仍精確落在 0..65025。
+     */
+    protected static int multiplyU8(int value, int factor) {
+        value &= 0xFF;
+        factor &= 0xFF;
+        int product = value * (factor & 0x7F);
+        if ((factor & 0x80) != 0) product += value << 7;
+        return product;
+    }
+
+    private static int clamp8(int value) {
+        return value < 0 ? 0 : value > 255 ? 255 : value;
+    }
+
+    private void rasterPixel(int x, int y, int source) {
+        int clipX = midpGraphics.getClipX();
+        int clipY = midpGraphics.getClipY();
+        if (x < clipX || y < clipY || x >= clipX + midpGraphics.getClipWidth() || y >= clipY + midpGraphics.getClipHeight()) return;
+        int px = x + originX;
+        int py = y + originY;
+        if (px < 0 || py < 0 || px >= screenWidth || py >= screenHeight) return;
+        if (renderMode == 0 && ((source >>> 24) & 0xFF) == 255) {
+            ensureScratch(1);
+            fillScratch[0] = 0xFF000000 | (source & 0x00FFFFFF);
+            midpGraphics.drawRGB(fillScratch, 0, 1, x, y, 1, 1, false);
+            return;
+        }
+        ensureBlendScratch(1);
+        backBuffer.getRGB(blendScratch, 0, 1, px, py, 1, 1);
+        blendScratch[0] = rasterPixelValue(source, blendScratch[0]);
+        midpGraphics.drawRGB(blendScratch, 0, 1, x, y, 1, 1, false);
+    }
+
+    /**
+     * 處理單色半透明填滿（常用於 DoJa 遊戲的全螢幕 淡入/淡出 或 色彩遮罩）。
+     * 優化策略：
+     * 1. 使用 3 x 256 的預算查找表（LUT）處理 RGB 三通道，避免每個像素重複執行 6 次乘法與 Clamp 邊界檢查。
+     * 2. 僅在顏色或渲染狀態改變時才重新建構查找表，避免浪費。
+     * 3. 採用分塊批次讀寫像素，避免記憶體開銷過大。
+     */
+    private void fillSolid(int x, int y, int w, int h, int source) {
+        if (w <= 0 || h <= 0) return;
+        int sourceAlpha = (source >>> 24) & 0xFF;
+        if (sourceAlpha == 0) return;
+
+        int clipX = midpGraphics.getClipX();
+        int clipY = midpGraphics.getClipY();
+        int clipR = clipX + midpGraphics.getClipWidth();
+        int clipB = clipY + midpGraphics.getClipHeight();
+        int left = x > clipX ? x : clipX;
+        int top = y > clipY ? y : clipY;
+        int right = x + w < clipR ? x + w : clipR;
+        int bottom = y + h < clipB ? y + h : clipB;
+        int physL = left + originX;
+        int physT = top + originY;
+        if (physL < 0) { left -= physL; physL = 0; }
+        if (physT < 0) { top -= physT; physT = 0; }
+        if (right + originX > screenWidth) right = screenWidth - originX;
+        if (bottom + originY > screenHeight) bottom = screenHeight - originY;
+        if (left >= right || top >= bottom) return;
+
+        prepareSolidCompositeLut(source);
+
+        int blockW = right - left;
+        if (blockW > SOLID_COMPOSITE_PIXELS) blockW = SOLID_COMPOSITE_PIXELS;
+        int rowsPerBlock = SOLID_COMPOSITE_PIXELS / blockW;
+        if (rowsPerBlock < 1) rowsPerBlock = 1;
+        int maxRows = bottom - top;
+        if (maxRows > rowsPerBlock) maxRows = rowsPerBlock;
+        ensureBlendScratch(blockW * maxRows);
+
+        for (int by = top; by < bottom; by += rowsPerBlock) {
+            int bh = bottom - by;
+            if (bh > rowsPerBlock) bh = rowsPerBlock;
+            for (int bx = left; bx < right; bx += blockW) {
+                int bw = right - bx;
+                if (bw > blockW) bw = blockW;
+                int count = bw * bh;
+                backBuffer.getRGB(blendScratch, 0, bw, bx + originX, by + originY, bw, bh);
+                for (int i = 0; i < count; i++) {
+                    int dst = blendScratch[i];
+                    blendScratch[i] = solidCompositeLut[(dst >>> 16) & 0xFF]
+                            | solidCompositeLut[256 + ((dst >>> 8) & 0xFF)]
+                            | solidCompositeLut[512 + (dst & 0xFF)];
+                }
+                midpGraphics.drawRGB(blendScratch, 0, bw, bx, by, bw, bh, false);
+            }
+        }
+    }
+
+    private void prepareSolidCompositeLut(int source) {
+        if (solidCompositeLut == null) solidCompositeLut = new int[256 * 3];
+        if (solidLutValid && solidLutSource == source && solidLutMode == renderMode
+                && solidLutSrcRatio == srcRatio && solidLutDstRatio == dstRatio) return;
+
+        int a = (source >>> 24) & 0xFF;
+        int sr = (source >>> 16) & 0xFF;
+        int sg = (source >>> 8) & 0xFF;
+        int sb = source & 0xFF;
+
+        if (renderMode == 0) {
+            int inv = 255 - a;
+            int baseR = multiplyU8(sr, a) + 127;
+            int baseG = multiplyU8(sg, a) + 127;
+            int baseB = multiplyU8(sb, a) + 127;
+            int dstTerm = 0;
+            for (int value = 0; value < 256; value++) {
+                solidCompositeLut[value] = 0xFF000000 | (((baseR + dstTerm) / 255) << 16);
+                solidCompositeLut[256 + value] = ((baseG + dstTerm) / 255) << 8;
+                solidCompositeLut[512 + value] = (baseB + dstTerm) / 255;
+                dstTerm += inv;
+            }
+        } else {
+            int baseR = multiplyU8(sr, srcRatio);
+            int baseG = multiplyU8(sg, srcRatio);
+            int baseB = multiplyU8(sb, srcRatio);
+            int dstTerm = 0;
+            if (renderMode == 1) {
+                for (int value = 0; value < 256; value++) {
+                    solidCompositeLut[value] = 0xFF000000 | (clamp8((baseR + dstTerm) >> 8) << 16);
+                    solidCompositeLut[256 + value] = clamp8((baseG + dstTerm) >> 8) << 8;
+                    solidCompositeLut[512 + value] = clamp8((baseB + dstTerm) >> 8);
+                    dstTerm += dstRatio;
+                }
+            } else {
+                for (int value = 0; value < 256; value++) {
+                    solidCompositeLut[value] = 0xFF000000 | (clamp8((dstTerm - baseR) >> 8) << 16);
+                    solidCompositeLut[256 + value] = clamp8((dstTerm - baseG) >> 8) << 8;
+                    solidCompositeLut[512 + value] = clamp8((dstTerm - baseB) >> 8);
+                    dstTerm += dstRatio;
+                }
+            }
+        }
+
+        solidLutSource = source;
+        solidLutMode = renderMode;
+        solidLutSrcRatio = srcRatio;
+        solidLutDstRatio = dstRatio;
+        solidLutValid = true;
+    }
+
+    private void rasterLine(int x1, int y1, int x2, int y2, int source) {
+        if (y1 == y2) { fillSolid(x1 < x2 ? x1 : x2, y1, Math.abs(x2 - x1) + 1, 1, source); return; }
+        if (x1 == x2) { fillSolid(x1, y1 < y2 ? y1 : y2, 1, Math.abs(y2 - y1) + 1, source); return; }
+        int dx = Math.abs(x2 - x1), sx = x1 < x2 ? 1 : -1;
+        int dy = -Math.abs(y2 - y1), sy = y1 < y2 ? 1 : -1;
+        int err = dx + dy;
+        for (;;) {
+            rasterPixel(x1, y1, source);
+            if (x1 == x2 && y1 == y2) break;
+            int e2 = err << 1;
+            if (e2 >= dy) { err += dy; x1 += sx; }
+            if (e2 <= dx) { err += dx; y1 += sy; }
+        }
+    }
+
+    private void copyAreaSoftware(int sx, int sy, int width, int height, int dstX, int dstY) {
+        int yStart = 0, yEnd = height, yStep = 1;
+        if (dstY > sy && dstY < sy + height) { yStart = height - 1; yEnd = -1; yStep = -1; }
+        int max = width < COMPOSITE_PIXELS ? width : COMPOSITE_PIXELS;
+        ensureScratch(max);
+        for (int ry = yStart; ry != yEnd; ry += yStep) {
+            boolean reverseX = dstY + ry == sy + ry && dstX > sx && dstX < sx + width;
+            if (reverseX) {
+                for (int remain = width; remain > 0;) {
+                    int bw = remain < max ? remain : max;
+                    int bx = remain - bw;
+                    backBuffer.getRGB(fillScratch, 0, bw, sx + bx + originX, sy + ry + originY, bw, 1);
+                    drawRGBComposite(fillScratch, 0, bw, dstX + bx, dstY + ry, bw, 1, false);
+                    remain -= bw;
+                }
+            } else {
+                for (int bx = 0; bx < width; bx += max) {
+                    int bw = width - bx; if (bw > max) bw = max;
+                    backBuffer.getRGB(fillScratch, 0, bw, sx + bx + originX, sy + ry + originY, bw, 1);
+                    drawRGBComposite(fillScratch, 0, bw, dstX + bx, dstY + ry, bw, 1, false);
+                }
+            }
+        }
+    }
+
+    private int[] ensurePolygonScratch(int size) {
+        if (polygonScratch == null || polygonScratch.length < size) {
+            polygonScratch = new int[size];
+        }
+        return polygonScratch;
+    }
+
+    private void ensureBlendScratch(int size) {
+        if (size > SOLID_COMPOSITE_PIXELS) throw new IllegalArgumentException("blend scratch exceeds fixed limit");
+        if (blendScratch == null || blendScratch.length < size) blendScratch = new int[size];
+    }
+
+    private void ensureScratch(int size) {
+        if (size > COMPOSITE_PIXELS) throw new IllegalArgumentException("draw scratch exceeds fixed limit");
+        if (fillScratch == null || fillScratch.length < size) {
+            fillScratch = new int[size];
+        }
+    }
+
+    public void fillArc(int x, int y, int w, int h, int startAngle, int arcAngle) {
+        ensureSurface();
+        if (w <= 0 || h <= 0 || arcAngle == 0) return;
+        if (renderMode == 0 && ((currentARGB >>> 24) & 0xFF) == 255) {
+            midpGraphics.fillArc(x, y, w, h, startAngle, arcAngle);
+            return;
+        }
+        rasterArc(x, y, w, h, startAngle, arcAngle, true);
+    }
+
+    public void drawArc(int x, int y, int w, int h, int startAngle, int arcAngle) {
+        ensureSurface();
+        if (w < 0 || h < 0 || arcAngle == 0) return;
+        if (renderMode == 0 && ((currentARGB >>> 24) & 0xFF) == 255) {
+            midpGraphics.drawArc(x, y, w, h, startAngle, arcAngle);
+            return;
+        }
+        rasterArc(x, y, w, h, startAngle, arcAngle, false);
+    }
+
+    private void rasterArc(int x, int y, int w, int h, int startAngle, int arcAngle, boolean fill) {
+        if (w == 0 || h == 0) { drawLine(x, y, x + w, y + h); return; }
+        int full = arcAngle >= 360 || arcAngle <= -360 ? 1 : 0;
+        int sweep = 0;
+        int startX = 0, startY = 0, endX = 0, endY = 0;
+        if (full == 0) {
+            int start = startAngle % 360;
+            if (start < 0) start += 360;
+            if (arcAngle > 0) {
+                sweep = arcAngle;
+            } else {
+                start = (start + arcAngle) % 360;
+                if (start < 0) start += 360;
+                sweep = -arcAngle;
+            }
+            int end = (start + sweep) % 360;
+            startX = cosQ30(start);
+            startY = sinQ30(start);
+            endX = cosQ30(end);
+            endY = sinQ30(end);
+        }
+        long ww = (long)w * (long)w;
+        long hh = (long)h * (long)h;
+        long bound = ww * hh;
+        int innerW = w > 2 ? w - 2 : 0;
+        int innerH = h > 2 ? h - 2 : 0;
+        long iww = (long)innerW * innerW;
+        long ihh = (long)innerH * innerH;
+        long innerBound = iww * ihh;
+        for (int py = y; py <= y + h; py++) {
+            int run = -1;
+            for (int px = x; px <= x + w; px++) {
+                long dx = ((long)(px - x) << 1) - w;
+                long dy = ((long)(py - y) << 1) - h;
+                boolean inside = dx * dx * hh + dy * dy * ww <= bound;
+                boolean hit = inside && (full != 0 || angleInside(dx, -dy, startX, startY, endX, endY, sweep));
+                if (!fill && hit && innerW > 0 && innerH > 0) {
+                    hit = dx * dx * ihh + dy * dy * iww > innerBound;
+                }
+                if (hit) {
+                    if (run < 0) run = px;
+                } else if (run >= 0) {
+                    fillSolid(run, py, px - run, 1, currentARGB);
+                    run = -1;
+                }
+            }
+            if (run >= 0) fillSolid(run, py, x + w + 1 - run, 1, currentARGB);
+        }
+    }
+
+    /**
+     * 判斷指定點 (dx, dy) 是否落在角度範圍內。
+     * 
+     * 1. 採用起始邊、結束邊的方向向量做叉積（Cross Product）的整數運算
+     * 2. 透過正負號判斷點落在射線的哪一側
+     * 3. 根據掃描角（Sweep Angle）是否大於 180 度決定不同邏輯：
+     *    - 小於等於 180 度：點必須同時落在 起始線左側 與 結束線右側（交集）。
+     *    - 大於 180 度：不是同時落在兩邊外側的盲區（聯集）。
+     */
+    private static boolean angleInside(long dx, long dy,
+                                       int startX, int startY,
+                                       int endX, int endY, int sweep)
+    {
+        if (dx == 0L && dy == 0L) dx = 1L;
+        long startToPoint = (long)startX * dy - (long)startY * dx;
+        long pointToEnd = dx * (long)endY - dy * (long)endX;
+        if (sweep <= 180) {
+            return startToPoint >= 0L && pointToEnd >= 0L;
+        }
+        long endToPoint = (long)endX * dy - (long)endY * dx;
+        long pointToStart = dx * (long)startY - dy * (long)startX;
+        return !(endToPoint > 0L && pointToStart > 0L);
+    }
+
+    public void fillPolygon(int[] xPoints, int[] yPoints, int nPoints) {
+        fillPolygon(xPoints, yPoints, 0, nPoints);
+    }
+
+    public void fillPolygon(int[] xPoints, int[] yPoints, int offset, int count) {
+        ensureSurface();
+        if (xPoints == null || yPoints == null || count < 3) return;
+        if (renderMode == 0 && ((currentARGB >>> 24) & 0xFF) == 255) {
+            for (int i = offset + 1; i < offset + count - 1; i++) {
+                midpGraphics.fillTriangle(xPoints[offset], yPoints[offset], xPoints[i], yPoints[i], xPoints[i + 1], yPoints[i + 1]);
+            }
+            return;
+        }
+        int minY = yPoints[offset], maxY = minY;
+        for (int i = offset + 1; i < offset + count; i++) {
+            if (yPoints[i] < minY) minY = yPoints[i];
+            if (yPoints[i] > maxY) maxY = yPoints[i];
+        }
+        int[] nodes = ensurePolygonScratch(count);
+        for (int y = minY; y <= maxY; y++) {
+            int n = 0;
+            int j = offset + count - 1;
+            for (int i = offset; i < offset + count; i++) {
+                int yi = yPoints[i], yj = yPoints[j];
+                if ((yi < y && yj >= y) || (yj < y && yi >= y)) {
+                    nodes[n++] = xPoints[i] + (int)((long)(y - yi) * (xPoints[j] - xPoints[i]) / (yj - yi));
+                }
+                j = i;
+            }
+            for (int i = 1; i < n; i++) {
+                int v = nodes[i], k = i - 1;
+                while (k >= 0 && nodes[k] > v) { nodes[k + 1] = nodes[k]; k--; }
+                nodes[k + 1] = v;
+            }
+            for (int i = 0; i + 1 < n; i += 2) {
+                if (nodes[i + 1] >= nodes[i]) fillSolid(nodes[i], y, nodes[i + 1] - nodes[i] + 1, 1, currentARGB);
+            }
+        }
+    }
+
+    public Graphics copy() {
+        Graphics g = new Graphics();
+        g.currentARGB = currentARGB;
+        g.flipMode = flipMode;
+        g.currentFont = currentFont;
+        g.renderMode = renderMode;
+        g.srcRatio = srcRatio;
+        g.dstRatio = dstRatio;
+        return g;
+    }
+
+    public void dispose() {
+        backBuffer = null;
+        midpGraphics = null;
+        fillScratch = null;
+        pixelScratch = null;
+        blendScratch = null;
+        polygonScratch = null;
+        lockCount = 0;
+    }
+}
