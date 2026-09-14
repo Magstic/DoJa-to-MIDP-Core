@@ -1,6 +1,7 @@
 package com.nttdocomo.ui;
 
 import com.nttdocomo.opt.ui.Graphics2;
+import doja.Graphics2Impl;
 
 public abstract class Canvas extends Frame implements Runnable {
     public static final int KEY_LEFT = 16;
@@ -18,7 +19,7 @@ public abstract class Canvas extends Frame implements Runnable {
 
     public Graphics getGraphics() {
         if (dojaGraphics == null) {
-            dojaGraphics = new Graphics2();
+            dojaGraphics = new Graphics2Impl();
             dojaGraphics.parentCanvas = this;
         }
         return dojaGraphics;

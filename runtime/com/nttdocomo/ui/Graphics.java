@@ -40,18 +40,26 @@ public class Graphics {
     protected int renderMode = 0;
     protected int srcRatio = 255;
     protected int dstRatio = 255;
+    private boolean nativeRenderFastPath = true;
     private int lockCount;
     private boolean presenting;
     private int[] fillScratch;
     private int[] pixelScratch;
     private int[] blendScratch;
     private int[] polygonScratch;
+    private int[] scaleMapX;
+    private int[] scaleMapY;
     private int[] solidCompositeLut;
     private int solidLutSource;
     private int solidLutMode;
     private int solidLutSrcRatio;
     private int solidLutDstRatio;
     private boolean solidLutValid;
+    private int[] sourceRatioLut;
+    private int[] sourceScaleLut;
+    private int[] destinationRatioLut;
+    private int ratioLutSource = -1;
+    private int ratioLutDestination = -1;
     private javax.microedition.lcdui.Image textMaskImage;
     private javax.microedition.lcdui.Graphics textMaskGraphics;
     private int textMaskWidth;
@@ -245,6 +253,20 @@ public class Graphics {
         renderMode = operator;
         srcRatio = sourceRatio;
         dstRatio = destinationRatio;
+        nativeRenderFastPath = operator == 0 && sourceRatio == 255;
+        solidLutValid = false;
+        ratioLutSource = -1;
+        ratioLutDestination = -1;
+    }
+
+    protected final int getRenderModeState() { return renderMode; }
+    protected final int getSourceRatioState() { return srcRatio; }
+    protected final int getDestinationRatioState() { return dstRatio; }
+    protected final int getFlipModeState() { return flipMode; }
+    protected final boolean isNativeRenderFastPath() { return nativeRenderFastPath; }
+    protected final boolean hasActiveLock() { synchronized (this) { return lockCount != 0; } }
+    protected final boolean canPresentLockedSurface() {
+        return parentCanvas != null && Display.getCurrent() == parentCanvas && parentCanvas.isShown();
     }
 
     protected int getEffectiveAlpha(int objectAlpha) {
@@ -397,7 +419,7 @@ public class Graphics {
 
         javax.microedition.lcdui.Image src = img.getMIDPImage();
         if (src == null) return;
-        if (renderMode == 0 && imageAlpha >= 255 && sw == dw && sh == dh) {
+        if (nativeRenderFastPath && imageAlpha >= 255 && sw == dw && sh == dh) {
             if (flipMode == FLIP_NONE) {
                 int cx = midpGraphics.getClipX();
                 int cy = midpGraphics.getClipY();
@@ -430,6 +452,7 @@ public class Graphics {
         int imageAlpha = image.getAlpha();
         boolean colourKey = image.isTransparentEnabled();
         int transparent = image.getTransparentColor() & 0x00ffffff;
+        if (sw != dw || sh != dh) prepareScaleMaps(dw, dh, sw, sh);
 
         /* 
          * drawImage() 是系統常見的效能熱點，因此改為一次搬移一整條切片，同時將暫存緩衝區控制在 4096 像素內。
@@ -455,12 +478,12 @@ public class Graphics {
             if (!rotated) {
                 int preY = (flipMode == FLIP_VERTICAL || flipMode == FLIP_ROTATE)
                     ? dh - 1 - outY : outY;
-                int sourceY = sy + preY * sh / dh;
+                int sourceY = sy + scaleMapY[preY];
                 src.getRGB(pixelScratch, 0, sw, sx, sourceY, sw, 1);
                 for (int outX = 0; outX < outW; outX++) {
                     int preX = (flipMode == FLIP_HORIZONTAL || flipMode == FLIP_ROTATE)
                         ? dw - 1 - outX : outX;
-                    int pixel = pixelScratch[preX * sw / dw];
+                    int pixel = pixelScratch[scaleMapX[preX]];
                     fillScratch[outX] = applyImageAlpha(pixel, imageAlpha, colourKey, transparent);
                 }
             } else {
@@ -472,7 +495,7 @@ public class Graphics {
                     default:
                         preX = outY; break;
                 }
-                int sourceX = sx + preX * sw / dw;
+                int sourceX = sx + scaleMapX[preX];
                 src.getRGB(pixelScratch, 0, 1, sourceX, sy, 1, sh);
                 for (int outX = 0; outX < outW; outX++) {
                     int preY;
@@ -483,7 +506,7 @@ public class Graphics {
                         default:
                             preY = outX; break;
                     }
-                    int pixel = pixelScratch[preY * sh / dh];
+                    int pixel = pixelScratch[scaleMapY[preY]];
                     fillScratch[outX] = applyImageAlpha(pixel, imageAlpha, colourKey, transparent);
                 }
             }
@@ -566,11 +589,11 @@ public class Graphics {
                 if (!rotated) {
                     int preY = (flipMode == FLIP_VERTICAL || flipMode == FLIP_ROTATE)
                             ? dh - 1 - gy : gy;
-                    int sourceY = preY * sh / dh;
+                    int sourceY = scaleMapY[preY];
                     for (int ox = 0; ox < outW; ox++) {
                         int preX = (flipMode == FLIP_HORIZONTAL || flipMode == FLIP_ROTATE)
                                 ? dw - 1 - ox : ox;
-                        int sourceX = preX * sw / dw;
+                        int sourceX = scaleMapX[preX];
                         int pixel = pixelScratch[sourceY * sw + sourceX];
                         fillScratch[outRow + ox] = applyImageAlpha(
                                 pixel, imageAlpha, colourKey, transparent);
@@ -584,7 +607,7 @@ public class Graphics {
                         default:
                             preX = gy; break;
                     }
-                    int sourceX = preX * sw / dw;
+                    int sourceX = scaleMapX[preX];
                     for (int ox = 0; ox < outW; ox++) {
                         int preY;
                         switch (flipMode) {
@@ -594,7 +617,7 @@ public class Graphics {
                             default:
                                 preY = ox; break;
                         }
-                        int sourceY = preY * sh / dh;
+                        int sourceY = scaleMapY[preY];
                         int pixel = pixelScratch[sourceY * sw + sourceX];
                         fillScratch[outRow + ox] = applyImageAlpha(
                                 pixel, imageAlpha, colourKey, transparent);
@@ -605,28 +628,44 @@ public class Graphics {
         }
     }
 
+    private void prepareScaleMaps(int destinationWidth, int destinationHeight,
+            int sourceWidth, int sourceHeight) {
+        if (scaleMapX == null || scaleMapX.length < destinationWidth) scaleMapX = new int[destinationWidth];
+        if (scaleMapY == null || scaleMapY.length < destinationHeight) scaleMapY = new int[destinationHeight];
+        fillScaleMap(scaleMapX, destinationWidth, sourceWidth);
+        fillScaleMap(scaleMapY, destinationHeight, sourceHeight);
+    }
+
+    /** floor(i * source / destination), using only two divisions for the entire axis. */
+    private static void fillScaleMap(int[] map, int destination, int source) {
+        int step = source / destination;
+        int remainderStep = source % destination;
+        int sourceIndex = 0;
+        int remainder = 0;
+        for (int i = 0; i < destination; i++) {
+            map[i] = sourceIndex;
+            sourceIndex += step;
+            remainder += remainderStep;
+            if (remainder >= destination) {
+                remainder -= destination;
+                sourceIndex++;
+            }
+        }
+    }
+
     protected int prepareImagePixel(Image image, int pixel) {
         if (image == null) return 0;
         return applyImageAlpha(pixel, image.getAlpha(), image.isTransparentEnabled(),
                 image.getTransparentColor() & 0x00FFFFFF);
     }
 
-    protected void drawRGBReplacement(int[] rgb, int offset, int scanlength, int x, int y,
-            int width, int height, boolean processAlpha) {
-        int oldMode = renderMode;
-        int oldSrc = srcRatio;
-        int oldDst = dstRatio;
-        renderMode = 0; srcRatio = 255; dstRatio = 255;
-        try { drawRGBComposite(rgb, offset, scanlength, x, y, width, height, processAlpha); }
-        finally { renderMode = oldMode; srcRatio = oldSrc; dstRatio = oldDst; }
-    }
 
     private static int applyImageAlpha(int pixel, int imageAlpha,
             boolean colourKey, int transparent) {
         int rgb = pixel & 0x00ffffff;
         int alpha = (pixel >>> 24) & 0xff;
         if (colourKey && rgb == transparent) alpha = 0;
-        if (imageAlpha < 255) alpha = (multiplyU8(alpha, imageAlpha) + 127) / 255;
+        if (imageAlpha < 255) alpha = div255Round(multiplyU8(alpha, imageAlpha));
         return rgb | (alpha << 24);
     }
 
@@ -664,11 +703,13 @@ public class Graphics {
             }
         }
         int alpha = getEffectiveAlpha(255);
-        if (renderMode == 0 && alpha == 255) {
+        if (canUseNativeSolid(currentARGB) && alpha == 255) {
             int yy = y;
             if (currentFont != null) yy += currentFont.getBaselineShift();
+            beginNativeSolid(currentARGB);
             midpGraphics.drawString(str, x, yy,
                     javax.microedition.lcdui.Graphics.BASELINE | javax.microedition.lcdui.Graphics.LEFT);
+            endNativeSolid();
             return;
         }
         drawNativeTextComposite(str, x, y, alpha);
@@ -722,8 +763,10 @@ public class Graphics {
 
     public void drawLine(int x1, int y1, int x2, int y2) {
         ensureSurface();
-        if (renderMode == 0 && ((currentARGB >>> 24) & 0xFF) == 255) {
+        if (canUseNativeSolid(currentARGB)) {
+            beginNativeSolid(currentARGB);
             midpGraphics.drawLine(x1, y1, x2, y2);
+            endNativeSolid();
             return;
         }
         rasterLine(x1, y1, x2, y2, currentARGB);
@@ -744,8 +787,10 @@ public class Graphics {
     public void drawRect(int x, int y, int w, int h) {
         ensureSurface();
         if (w < 0 || h < 0) return;
-        if (renderMode == 0 && ((currentARGB >>> 24) & 0xFF) == 255) {
+        if (canUseNativeSolid(currentARGB)) {
+            beginNativeSolid(currentARGB);
             midpGraphics.drawRect(x, y, w, h);
+            endNativeSolid();
             return;
         }
         drawLine(x, y, x + w, y);
@@ -760,8 +805,10 @@ public class Graphics {
         ensureSurface();
         if (w <= 0 || h <= 0) return;
         int alpha = (currentARGB >>> 24) & 0xFF;
-        if (renderMode == 0 && alpha == 255) {
+        if (canUseNativeSolid(currentARGB)) {
+            beginNativeSolid(currentARGB);
             midpGraphics.fillRect(x, y, w, h);
+            endNativeSolid();
             return;
         }
         fillSolid(x, y, w, h, currentARGB);
@@ -772,7 +819,7 @@ public class Graphics {
         if (w <= 0 || h <= 0) return;
         int background = parentCanvas == null
                 ? getColorOfName(BLACK) : parentCanvas.getBackground();
-        if (renderMode == 0) {
+        if (nativeRenderFastPath) {
             int old = currentARGB;
             setColor(background);
             midpGraphics.fillRect(x, y, w, h);
@@ -787,7 +834,7 @@ public class Graphics {
         if (width <= 0 || height <= 0) return;
         int dstX = sx + dx;
         int dstY = sy + dy;
-        if (renderMode == 0) {
+        if (nativeRenderFastPath) {
             try {
                 midpGraphics.copyArea(sx, sy, width, height, dstX, dstY,
                     javax.microedition.lcdui.Graphics.TOP | javax.microedition.lcdui.Graphics.LEFT);
@@ -868,10 +915,15 @@ public class Graphics {
     protected void drawRGBComposite(int[] rgb, int offset, int scanlength, int x, int y, int width, int height, boolean processAlpha) {
         ensureSurface();
         if (rgb == null || width <= 0 || height <= 0) return;
-        if (renderMode == 0) {
+        if (nativeRenderFastPath) {
             midpGraphics.drawRGB(rgb, offset, scanlength, x, y, width, height, processAlpha);
             return;
         }
+        if (renderMode == 0) {
+            drawRGBReplaceScaled(rgb, offset, scanlength, x, y, width, height, processAlpha);
+            return;
+        }
+        prepareRatioLuts();
         int clipX = midpGraphics.getClipX();
         int clipY = midpGraphics.getClipY();
         int clipR = clipX + midpGraphics.getClipWidth();
@@ -907,69 +959,200 @@ public class Graphics {
                 if (bw > blockW) bw = blockW;
                 int px = bx + originX;
                 backBuffer.getRGB(blendScratch, 0, bw, px, by + originY, bw, bh);
-                for (int ry = 0; ry < bh; ry++) {
-                    int srcRow = offset + (by + ry - y) * scanlength + (bx - x);
-                    int dstRow = ry * bw;
-                    for (int col = 0; col < bw; col++) {
-                        int src = rgb[srcRow + col];
-                        if (!processAlpha) src = 0xFF000000 | (src & 0x00FFFFFF);
-                        int di = dstRow + col;
-                        blendScratch[di] = rasterPixelValue(src, blendScratch[di]);
-                    }
+                if (renderMode == 1) {
+                    compositeAddTile(rgb, offset, scanlength, x, y, bx, by, bw, bh, processAlpha);
+                } else {
+                    compositeSubTile(rgb, offset, scanlength, x, y, bx, by, bw, bh, processAlpha);
                 }
                 midpGraphics.drawRGB(blendScratch, 0, bw, bx, by, bw, bh, false);
             }
         }
     }
 
-    private int rasterPixelValue(int src, int dst) {
-        int a = (src >>> 24) & 0xFF;
-        if (a == 0) return dst;
-        if (renderMode == 0) {
-            if (a >= 255) return 0xFF000000 | (src & 0x00FFFFFF);
-            int inv = 255 - a;
-            int r = (multiplyU8((src >>> 16) & 0xFF, a) + multiplyU8((dst >>> 16) & 0xFF, inv) + 127) / 255;
-            int g = (multiplyU8((src >>> 8) & 0xFF, a) + multiplyU8((dst >>> 8) & 0xFF, inv) + 127) / 255;
-            int b = (multiplyU8(src & 0xFF, a) + multiplyU8(dst & 0xFF, inv) + 127) / 255;
-            return 0xFF000000 | (r << 16) | (g << 8) | b;
+    private void compositeAddTile(int[] source, int offset, int scanlength,
+            int drawX, int drawY, int tileX, int tileY, int width, int height, boolean processAlpha) {
+        for (int row = 0; row < height; row++) {
+            int srcRow = offset + (tileY + row - drawY) * scanlength + (tileX - drawX);
+            int dstRow = row * width;
+            for (int col = 0; col < width; col++) {
+                int src = source[srcRow + col];
+                int alpha = processAlpha ? (src >>> 24) & 0xFF : 255;
+                if (alpha == 0) continue;
+                int index = dstRow + col;
+                int dst = blendScratch[index];
+                int dr = (dst >>> 16) & 0xFF;
+                int dg = (dst >>> 8) & 0xFF;
+                int db = dst & 0xFF;
+                int n = sourceRatioLut[(src >>> 16) & 0xFF] + destinationRatioLut[dr];
+                int rr = n >= 65025 ? 255 : div255Floor(n);
+                n = sourceRatioLut[(src >>> 8) & 0xFF] + destinationRatioLut[dg];
+                int rg = n >= 65025 ? 255 : div255Floor(n);
+                n = sourceRatioLut[src & 0xFF] + destinationRatioLut[db];
+                int rb = n >= 65025 ? 255 : div255Floor(n);
+                if (alpha < 255) {
+                    int inv = 255 - alpha;
+                    rr = div255Round(multiplyU8(rr, alpha) + multiplyU8(dr, inv));
+                    rg = div255Round(multiplyU8(rg, alpha) + multiplyU8(dg, inv));
+                    rb = div255Round(multiplyU8(rb, alpha) + multiplyU8(db, inv));
+                }
+                blendScratch[index] = 0xFF000000 | (rr << 16) | (rg << 8) | rb;
+            }
         }
-        int sr = (src >>> 16) & 0xFF;
-        int sg = (src >>> 8) & 0xFF;
-        int sb = src & 0xFF;
-        int dr = (dst >>> 16) & 0xFF;
-        int dg = (dst >>> 8) & 0xFF;
-        int db = dst & 0xFF;
-        int rr, rg, rb;
-        if (renderMode == 1) {
-            rr = (multiplyU8(sr, srcRatio) + multiplyU8(dr, dstRatio)) >> 8;
-            rg = (multiplyU8(sg, srcRatio) + multiplyU8(dg, dstRatio)) >> 8;
-            rb = (multiplyU8(sb, srcRatio) + multiplyU8(db, dstRatio)) >> 8;
-        } else {
-            rr = (multiplyU8(dr, dstRatio) - multiplyU8(sr, srcRatio)) >> 8;
-            rg = (multiplyU8(dg, dstRatio) - multiplyU8(sg, srcRatio)) >> 8;
-            rb = (multiplyU8(db, dstRatio) - multiplyU8(sb, srcRatio)) >> 8;
+    }
+
+    private void compositeSubTile(int[] source, int offset, int scanlength,
+            int drawX, int drawY, int tileX, int tileY, int width, int height, boolean processAlpha) {
+        for (int row = 0; row < height; row++) {
+            int srcRow = offset + (tileY + row - drawY) * scanlength + (tileX - drawX);
+            int dstRow = row * width;
+            for (int col = 0; col < width; col++) {
+                int src = source[srcRow + col];
+                int alpha = processAlpha ? (src >>> 24) & 0xFF : 255;
+                if (alpha == 0) continue;
+                int index = dstRow + col;
+                int dst = blendScratch[index];
+                int dr = (dst >>> 16) & 0xFF;
+                int dg = (dst >>> 8) & 0xFF;
+                int db = dst & 0xFF;
+                int n = destinationRatioLut[dr] - sourceRatioLut[(src >>> 16) & 0xFF];
+                int rr = n <= 0 ? 0 : div255Floor(n);
+                n = destinationRatioLut[dg] - sourceRatioLut[(src >>> 8) & 0xFF];
+                int rg = n <= 0 ? 0 : div255Floor(n);
+                n = destinationRatioLut[db] - sourceRatioLut[src & 0xFF];
+                int rb = n <= 0 ? 0 : div255Floor(n);
+                if (alpha < 255) {
+                    int inv = 255 - alpha;
+                    rr = div255Round(multiplyU8(rr, alpha) + multiplyU8(dr, inv));
+                    rg = div255Round(multiplyU8(rg, alpha) + multiplyU8(dg, inv));
+                    rb = div255Round(multiplyU8(rb, alpha) + multiplyU8(db, inv));
+                }
+                blendScratch[index] = 0xFF000000 | (rr << 16) | (rg << 8) | rb;
+            }
         }
-        rr = clamp8(rr); rg = clamp8(rg); rb = clamp8(rb);
-        // DoJa ADD/SUB 把 alpha 當參與開關：透明像素跳過，其餘像素直接按 srcRatio/dstRatio 做 raster operation.
-        return 0xFF000000 | (rr << 16) | (rg << 8) | rb;
     }
 
     /**
-     * DoJa Graphics 的色彩合成大量使用 8-bit channel x 8-bit ratio/alpha，
-     * 而真機實際執行這種大於 signed-16 範圍的乘積時，會發生截斷，造成渲染的色偏。
-     * 解決方式：拆開 factor 的最高 bit 後運算。
-     * 結果：每次乘法都低於 32768，最終結果仍精確落在 0..65025。
+     * OP_REPL does not depend on the destination.  For a non-255 source ratio, scale the source
+     * into the fixed scratch buffer and let MIDP perform the ordinary source-alpha write.  This
+     * avoids the expensive framebuffer read required by ADD/SUB.
      */
-    protected static int multiplyU8(int value, int factor) {
-        value &= 0xFF;
-        factor &= 0xFF;
-        int product = value * (factor & 0x7F);
-        if ((factor & 0x80) != 0) product += value << 7;
-        return product;
+    private void drawRGBReplaceScaled(int[] rgb, int offset, int scanlength,
+            int x, int y, int width, int height, boolean processAlpha) {
+        prepareRatioLuts();
+        int maxW = width < COMPOSITE_PIXELS ? width : COMPOSITE_PIXELS;
+        ensureScratch(maxW);
+        for (int row = 0; row < height; row++) {
+            int srcRow = offset + row * scanlength;
+            for (int bx = 0; bx < width; bx += maxW) {
+                int bw = width - bx;
+                if (bw > maxW) bw = maxW;
+                for (int i = 0; i < bw; i++) {
+                    int p = rgb[srcRow + bx + i];
+                    int a = processAlpha ? (p >>> 24) & 0xFF : 255;
+                    if (a == 0) {
+                        fillScratch[i] = 0;
+                    } else {
+                        int r = sourceScaleLut[(p >>> 16) & 0xFF];
+                        int g = sourceScaleLut[(p >>> 8) & 0xFF];
+                        int b = sourceScaleLut[p & 0xFF];
+                        fillScratch[i] = (a << 24) | (r << 16) | (g << 8) | b;
+                    }
+                }
+                midpGraphics.drawRGB(fillScratch, 0, bw, x + bx, y + row, bw, 1, true);
+            }
+        }
     }
 
-    private static int clamp8(int value) {
-        return value < 0 ? 0 : value > 255 ? 255 : value;
+    private int rasterPixelValue(int src, int dst) {
+        if (renderMode != 0 || srcRatio != 255) prepareRatioLuts();
+        return rasterPixelValuePrepared(src, dst);
+    }
+
+    private int rasterPixelValuePrepared(int src, int dst) {
+        int a = (src >>> 24) & 0xFF;
+        if (a == 0) return dst;
+
+        int sr = (src >>> 16) & 0xFF;
+        int sg = (src >>> 8) & 0xFF;
+        int sb = src & 0xFF;
+
+        if (renderMode == 0) {
+            if (srcRatio != 255) {
+                sr = sourceScaleLut[sr];
+                sg = sourceScaleLut[sg];
+                sb = sourceScaleLut[sb];
+            }
+            if (a >= 255) return 0xFF000000 | (sr << 16) | (sg << 8) | sb;
+            int inv = 255 - a;
+            int r = div255Round(multiplyU8(sr, a) + multiplyU8((dst >>> 16) & 0xFF, inv));
+            int g = div255Round(multiplyU8(sg, a) + multiplyU8((dst >>> 8) & 0xFF, inv));
+            int b = div255Round(multiplyU8(sb, a) + multiplyU8(dst & 0xFF, inv));
+            return 0xFF000000 | (r << 16) | (g << 8) | b;
+        }
+
+        int dr = (dst >>> 16) & 0xFF;
+        int dg = (dst >>> 8) & 0xFF;
+        int db = dst & 0xFF;
+        int rr = rasterChannel(sr, dr);
+        int rg = rasterChannel(sg, dg);
+        int rb = rasterChannel(sb, db);
+        if (a < 255) {
+            int inv = 255 - a;
+            rr = div255Round(multiplyU8(rr, a) + multiplyU8(dr, inv));
+            rg = div255Round(multiplyU8(rg, a) + multiplyU8(dg, inv));
+            rb = div255Round(multiplyU8(rb, a) + multiplyU8(db, inv));
+        }
+        return 0xFF000000 | (rr << 16) | (rg << 8) | rb;
+    }
+
+    private int rasterChannel(int source, int destination) {
+        int n;
+        if (renderMode == 1) {
+            n = sourceRatioLut[source] + destinationRatioLut[destination];
+            if (n >= 65025) return 255;
+            return div255Floor(n);
+        }
+        n = destinationRatioLut[destination] - sourceRatioLut[source];
+        if (n <= 0) return 0;
+        return div255Floor(n);
+    }
+
+    private void prepareRatioLuts() {
+        if (sourceRatioLut == null) sourceRatioLut = new int[256];
+        if (sourceScaleLut == null) sourceScaleLut = new int[256];
+        if (destinationRatioLut == null) destinationRatioLut = new int[256];
+        if (ratioLutSource != srcRatio) {
+            for (int i = 0; i < 256; i++) {
+                int product = multiplyU8(i, srcRatio);
+                sourceRatioLut[i] = product;
+                sourceScaleLut[i] = div255Floor(product);
+            }
+            ratioLutSource = srcRatio;
+        }
+        if (ratioLutDestination != dstRatio) {
+            for (int i = 0; i < 256; i++) destinationRatioLut[i] = multiplyU8(i, dstRatio);
+            ratioLutDestination = dstRatio;
+        }
+    }
+
+    /** 8-bit channel/ratio product; maximum 65025 is comfortably within Java int. */
+    protected static int multiplyU8(int value, int factor) {
+        return (value & 0xFF) * (factor & 0xFF);
+    }
+
+    /** Exact floor(value / 255) for 0..65025 without integer division. */
+    protected static int div255Floor(int value) {
+        int t = value + 1;
+        return (t + (t >> 8)) >> 8;
+    }
+
+    /** Round(value / 255) to nearest for 0..65025 without integer division. */
+    private static int div255Round(int value) {
+        return div255Floor(value + 127);
+    }
+
+    protected static int scaleU8(int value, int ratio) {
+        return div255Floor(multiplyU8(value, ratio));
     }
 
     private void rasterPixel(int x, int y, int source) {
@@ -979,9 +1162,9 @@ public class Graphics {
         int px = x + originX;
         int py = y + originY;
         if (px < 0 || py < 0 || px >= screenWidth || py >= screenHeight) return;
-        if (renderMode == 0 && ((source >>> 24) & 0xFF) == 255) {
+        if (canUseNativeSolid(source)) {
             ensureScratch(1);
-            fillScratch[0] = 0xFF000000 | (source & 0x00FFFFFF);
+            fillScratch[0] = 0xFF000000 | nativeSolidRGB(source);
             midpGraphics.drawRGB(fillScratch, 0, 1, x, y, 1, 1, false);
             return;
         }
@@ -1002,6 +1185,13 @@ public class Graphics {
         if (w <= 0 || h <= 0) return;
         int sourceAlpha = (source >>> 24) & 0xFF;
         if (sourceAlpha == 0) return;
+        if (canUseNativeSolid(source)) {
+            int restore = currentARGB & 0x00FFFFFF;
+            midpGraphics.setColor(nativeSolidRGB(source));
+            midpGraphics.fillRect(x, y, w, h);
+            midpGraphics.setColor(restore);
+            return;
+        }
 
         int clipX = midpGraphics.getClipX();
         int clipY = midpGraphics.getClipY();
@@ -1059,36 +1249,48 @@ public class Graphics {
         int sb = source & 0xFF;
 
         if (renderMode == 0) {
+            if (srcRatio != 255) {
+                prepareRatioLuts();
+                sr = sourceScaleLut[sr];
+                sg = sourceScaleLut[sg];
+                sb = sourceScaleLut[sb];
+            }
             int inv = 255 - a;
-            int baseR = multiplyU8(sr, a) + 127;
-            int baseG = multiplyU8(sg, a) + 127;
-            int baseB = multiplyU8(sb, a) + 127;
-            int dstTerm = 0;
+            int baseR = multiplyU8(sr, a);
+            int baseG = multiplyU8(sg, a);
+            int baseB = multiplyU8(sb, a);
             for (int value = 0; value < 256; value++) {
-                solidCompositeLut[value] = 0xFF000000 | (((baseR + dstTerm) / 255) << 16);
-                solidCompositeLut[256 + value] = ((baseG + dstTerm) / 255) << 8;
-                solidCompositeLut[512 + value] = (baseB + dstTerm) / 255;
-                dstTerm += inv;
+                int dstTerm = multiplyU8(value, inv);
+                solidCompositeLut[value] = 0xFF000000 | (div255Round(baseR + dstTerm) << 16);
+                solidCompositeLut[256 + value] = div255Round(baseG + dstTerm) << 8;
+                solidCompositeLut[512 + value] = div255Round(baseB + dstTerm);
             }
         } else {
-            int baseR = multiplyU8(sr, srcRatio);
-            int baseG = multiplyU8(sg, srcRatio);
-            int baseB = multiplyU8(sb, srcRatio);
-            int dstTerm = 0;
-            if (renderMode == 1) {
-                for (int value = 0; value < 256; value++) {
-                    solidCompositeLut[value] = 0xFF000000 | (clamp8((baseR + dstTerm) >> 8) << 16);
-                    solidCompositeLut[256 + value] = clamp8((baseG + dstTerm) >> 8) << 8;
-                    solidCompositeLut[512 + value] = clamp8((baseB + dstTerm) >> 8);
-                    dstTerm += dstRatio;
+            prepareRatioLuts();
+            int srcR = sourceRatioLut[sr];
+            int srcG = sourceRatioLut[sg];
+            int srcB = sourceRatioLut[sb];
+            int inv = 255 - a;
+            for (int value = 0; value < 256; value++) {
+                int dstTerm = destinationRatioLut[value];
+                int r, g, b;
+                if (renderMode == 1) {
+                    int n = srcR + dstTerm; r = n >= 65025 ? 255 : div255Floor(n);
+                    n = srcG + dstTerm; g = n >= 65025 ? 255 : div255Floor(n);
+                    n = srcB + dstTerm; b = n >= 65025 ? 255 : div255Floor(n);
+                } else {
+                    int n = dstTerm - srcR; r = n <= 0 ? 0 : div255Floor(n);
+                    n = dstTerm - srcG; g = n <= 0 ? 0 : div255Floor(n);
+                    n = dstTerm - srcB; b = n <= 0 ? 0 : div255Floor(n);
                 }
-            } else {
-                for (int value = 0; value < 256; value++) {
-                    solidCompositeLut[value] = 0xFF000000 | (clamp8((dstTerm - baseR) >> 8) << 16);
-                    solidCompositeLut[256 + value] = clamp8((dstTerm - baseG) >> 8) << 8;
-                    solidCompositeLut[512 + value] = clamp8((dstTerm - baseB) >> 8);
-                    dstTerm += dstRatio;
+                if (a < 255) {
+                    r = div255Round(multiplyU8(r, a) + multiplyU8(value, inv));
+                    g = div255Round(multiplyU8(g, a) + multiplyU8(value, inv));
+                    b = div255Round(multiplyU8(b, a) + multiplyU8(value, inv));
                 }
+                solidCompositeLut[value] = 0xFF000000 | (r << 16);
+                solidCompositeLut[256 + value] = g << 8;
+                solidCompositeLut[512 + value] = b;
             }
         }
 
@@ -1097,6 +1299,30 @@ public class Graphics {
         solidLutSrcRatio = srcRatio;
         solidLutDstRatio = dstRatio;
         solidLutValid = true;
+    }
+
+    private boolean canUseNativeSolid(int source) {
+        return renderMode == 0 && ((source >>> 24) & 0xFF) == 255;
+    }
+
+    private int nativeSolidRGB(int source) {
+        int r = (source >>> 16) & 0xFF;
+        int g = (source >>> 8) & 0xFF;
+        int b = source & 0xFF;
+        if (srcRatio != 255) {
+            r = scaleU8(r, srcRatio);
+            g = scaleU8(g, srcRatio);
+            b = scaleU8(b, srcRatio);
+        }
+        return (r << 16) | (g << 8) | b;
+    }
+
+    private void beginNativeSolid(int source) {
+        if (srcRatio != 255) midpGraphics.setColor(nativeSolidRGB(source));
+    }
+
+    private void endNativeSolid() {
+        if (srcRatio != 255) midpGraphics.setColor(currentARGB & 0x00FFFFFF);
     }
 
     private void rasterLine(int x1, int y1, int x2, int y2, int source) {
@@ -1161,8 +1387,10 @@ public class Graphics {
     public void fillArc(int x, int y, int w, int h, int startAngle, int arcAngle) {
         ensureSurface();
         if (w <= 0 || h <= 0 || arcAngle == 0) return;
-        if (renderMode == 0 && ((currentARGB >>> 24) & 0xFF) == 255) {
+        if (canUseNativeSolid(currentARGB)) {
+            beginNativeSolid(currentARGB);
             midpGraphics.fillArc(x, y, w, h, startAngle, arcAngle);
+            endNativeSolid();
             return;
         }
         rasterArc(x, y, w, h, startAngle, arcAngle, true);
@@ -1171,8 +1399,10 @@ public class Graphics {
     public void drawArc(int x, int y, int w, int h, int startAngle, int arcAngle) {
         ensureSurface();
         if (w < 0 || h < 0 || arcAngle == 0) return;
-        if (renderMode == 0 && ((currentARGB >>> 24) & 0xFF) == 255) {
+        if (canUseNativeSolid(currentARGB)) {
+            beginNativeSolid(currentARGB);
             midpGraphics.drawArc(x, y, w, h, startAngle, arcAngle);
+            endNativeSolid();
             return;
         }
         rasterArc(x, y, w, h, startAngle, arcAngle, false);
@@ -1259,10 +1489,12 @@ public class Graphics {
     public void fillPolygon(int[] xPoints, int[] yPoints, int offset, int count) {
         ensureSurface();
         if (xPoints == null || yPoints == null || count < 3) return;
-        if (renderMode == 0 && ((currentARGB >>> 24) & 0xFF) == 255) {
+        if (canUseNativeSolid(currentARGB)) {
+            beginNativeSolid(currentARGB);
             for (int i = offset + 1; i < offset + count - 1; i++) {
                 midpGraphics.fillTriangle(xPoints[offset], yPoints[offset], xPoints[i], yPoints[i], xPoints[i + 1], yPoints[i + 1]);
             }
+            endNativeSolid();
             return;
         }
         int minY = yPoints[offset], maxY = minY;
@@ -1292,14 +1524,19 @@ public class Graphics {
         }
     }
 
-    public Graphics copy() {
-        Graphics g = new Graphics();
+    protected void copyStateTo(Graphics g) {
         g.currentARGB = currentARGB;
         g.flipMode = flipMode;
         g.currentFont = currentFont;
         g.renderMode = renderMode;
         g.srcRatio = srcRatio;
         g.dstRatio = dstRatio;
+        g.nativeRenderFastPath = nativeRenderFastPath;
+    }
+
+    public Graphics copy() {
+        Graphics g = new Graphics();
+        copyStateTo(g);
         return g;
     }
 
@@ -1310,6 +1547,12 @@ public class Graphics {
         pixelScratch = null;
         blendScratch = null;
         polygonScratch = null;
+        scaleMapX = null;
+        scaleMapY = null;
+        sourceRatioLut = null;
+        sourceScaleLut = null;
+        destinationRatioLut = null;
+        solidCompositeLut = null;
         lockCount = 0;
     }
 }

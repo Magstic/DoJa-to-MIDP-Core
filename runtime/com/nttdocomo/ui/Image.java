@@ -1,5 +1,6 @@
 package com.nttdocomo.ui;
 
+import doja.Graphics2Impl;
 import doja.ImageResource;
 import doja.ImageRuntime;
 
@@ -59,7 +60,7 @@ public class Image {
     public Graphics getGraphics() {
         if (resource != null) return null;
         if (graphics == null && midpImage != null) {
-            graphics = new Graphics();
+            graphics = new Graphics2Impl();
             graphics.init(midpImage);
         }
         return graphics;

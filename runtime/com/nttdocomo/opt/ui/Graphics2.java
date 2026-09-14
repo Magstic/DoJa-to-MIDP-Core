@@ -1,11 +1,14 @@
 package com.nttdocomo.opt.ui;
 
 import com.nttdocomo.opt.ui.j3d.AffineTrans;
+import com.nttdocomo.ui.Display;
 import com.nttdocomo.ui.Graphics;
 import com.nttdocomo.ui.Image;
 import com.nttdocomo.ui.MediaImage;
 import com.nttdocomo.ui.MediaManager;
+import com.nttdocomo.ui.UIException;
 
+/** DoJa 5.x optional extended graphics surface. */
 public class Graphics2 extends Graphics {
     public static final int CM_NORMAL = 0;
     public static final int CM_ZOOM = 256;
@@ -14,13 +17,19 @@ public class Graphics2 extends Graphics {
     public static final int OP_ADD = 1;
     public static final int OP_SUB = 2;
 
+    private static final int SYNC_INTERVAL_US = 16667;
+
     private int coordinateMode = CM_NORMAL;
+    private int logicalOriginX;
+    private int logicalOriginY;
     private int[] coordScratchX;
     private int[] coordScratchY;
     private int[] affineSource;
     private int[] affineRow;
+    private boolean syncStarted;
+    private long syncTargetMicros;
 
-    public Graphics2() { super(); }
+    protected Graphics2() { super(); }
 
     public void setRenderMode(int operator, int srcRatio, int dstRatio) {
         setRenderModeState(operator, srcRatio, dstRatio);
@@ -28,30 +37,54 @@ public class Graphics2 extends Graphics {
 
     public void setCoordinateMode(int mode) {
         if (mode != CM_NORMAL && mode != CM_ZOOM) throw new IllegalArgumentException("invalid coordinate mode");
+        if (coordinateMode == mode) return;
         coordinateMode = mode;
+        applyPhysicalOrigin();
+    }
+
+    public void setOrigin(int x, int y) {
+        logicalOriginX = x;
+        logicalOriginY = y;
+        applyPhysicalOrigin();
+    }
+
+    private void applyPhysicalOrigin() {
+        if (coordinateMode == CM_ZOOM) super.setOrigin(logicalOriginX >> 8, logicalOriginY >> 8);
+        else super.setOrigin(logicalOriginX, logicalOriginY);
     }
 
     public static int getIntermediateColor(int color1, int color2, int ratio) {
         if (ratio < 0 || ratio > 255) throw new IllegalArgumentException("ratio out of range");
+        if (ratio == 0) return color1;
+        if (ratio == 255) return color2;
         int inv = 255 - ratio;
-        int r = (multiplyU8((color1 >>> 16) & 255, inv) + multiplyU8((color2 >>> 16) & 255, ratio)) / 255;
-        int g = (multiplyU8((color1 >>> 8) & 255, inv) + multiplyU8((color2 >>> 8) & 255, ratio)) / 255;
-        int b = (multiplyU8(color1 & 255, inv) + multiplyU8(color2 & 255, ratio)) / 255;
+        int r = div255Floor(multiplyU8((color1 >>> 16) & 255, inv)
+                + multiplyU8((color2 >>> 16) & 255, ratio));
+        int g = div255Floor(multiplyU8((color1 >>> 8) & 255, inv)
+                + multiplyU8((color2 >>> 8) & 255, ratio));
+        int b = div255Floor(multiplyU8(color1 & 255, inv)
+                + multiplyU8(color2 & 255, ratio));
         return 0xFF000000 | (r << 16) | (g << 8) | b;
     }
 
     public Image getImage(int x, int y, int width, int height) {
         ensureSurface();
-        /* getImage() 抓的是 framebuffer 原始像素，縮放座標只套在繪圖動作上。 */
         if (width <= 0 || height <= 0) throw new IllegalArgumentException("invalid capture size");
-        int px = x + getOriginX();
-        int py = y + getOriginY();
-        if (px < 0 || py < 0 || px + width > screenWidth || py + height > screenHeight) {
-            throw new IllegalArgumentException("capture outside graphics surface");
-        }
-        javax.microedition.lcdui.Image captured = javax.microedition.lcdui.Image.createImage(
-                backBuffer, px, py, width, height, 0);
-        return new Image(captured);
+        long requestedRight = (long)x + width;
+        long requestedBottom = (long)y + height;
+        int left = x < 0 ? 0 : x;
+        int top = y < 0 ? 0 : y;
+        int right = requestedRight > screenWidth ? screenWidth : (int)requestedRight;
+        int bottom = requestedBottom > screenHeight ? screenHeight : (int)requestedBottom;
+        if (left >= right || top >= bottom) return null;
+
+        int outW = right - left;
+        int outH = bottom - top;
+        int[] pixels = new int[outW * outH];
+        backBuffer.getRGB(pixels, 0, outW, left, top, outW, outH);
+        Image result = Image.createImage(outW, outH);
+        result.getGraphics().setRGBPixels(0, 0, outW, outH, pixels, 0);
+        return result;
     }
 
     public void drawNumber(int x, int y, int value, int digit) {
@@ -62,59 +95,135 @@ public class Graphics2 extends Graphics {
         while (pad-- > 0) out.append(' ');
         if (valueText.length() <= digit) out.append(valueText);
         else out.append(valueText.substring(valueText.length() - digit));
-        super.drawString(out.toString(), c(x), c(y));
+        drawString(out.toString(), x, y);
     }
 
     public void drawNthImage(MediaImage image, int k, int x, int y) {
         if (image == null) throw new NullPointerException("image");
-        super.drawImage(MediaManager.getImageFrame(image, k), c(x), c(y));
+        if (k < 0) throw new IllegalArgumentException("negative image index");
+        if (!MediaManager.isImageUsed(image)) throw new UIException(UIException.ILLEGAL_STATE, "unused media image");
+        Image frame;
+        try {
+            frame = MediaManager.getImageFrame(image, k);
+        } catch (IllegalArgumentException e) {
+            throw e;
+        } catch (RuntimeException e) {
+            throw new UIException(UIException.ILLEGAL_STATE, "media image unavailable");
+        }
+        if (frame == null || frame.getMIDPImage() == null) throw new UIException(UIException.ILLEGAL_STATE, "disposed media image");
+        drawImage(frame, x, y);
     }
 
-    /** MIDP 查不到可靠的垂直同步週期，因此用 0 表示由平台自行安排。 */
-    public int getSyncUnlockInterval() { return 0; }
+    public void drawSpriteSet(SpriteSet sprites) {
+        if (sprites == null) throw new NullPointerException("sprites");
+        drawSpriteSet(sprites, 0, sprites.getCount());
+    }
 
-    /** 把這一幀送出去；0 代表下一幀仍沒有可供排程的 vsync 間隔。 */
+    public void drawSpriteSet(SpriteSet sprites, int offset, int count) {
+        if (sprites == null) throw new NullPointerException("sprites");
+        int total = sprites.getCount();
+        if (offset < 0 || count < 0 || offset > total || count > total - offset) {
+            throw new ArrayIndexOutOfBoundsException();
+        }
+        Sprite[] all = sprites.getSprites();
+        for (int i = 0; i < total; i++) {
+            Sprite sprite = all[i];
+            if (sprite == null) throw new NullPointerException("sprite");
+            if (sprite.image() == null) throw new NullPointerException("sprite image");
+            if (sprite.image().getMIDPImage() == null) throw new UIException(UIException.ILLEGAL_STATE, "disposed sprite image");
+        }
+
+        int oldMode = getRenderModeState();
+        int oldSrc = getSourceRatioState();
+        int oldDst = getDestinationRatioState();
+        int oldFlip = getFlipModeState();
+        try {
+            int end = offset + count;
+            for (int i = offset; i < end; i++) {
+                Sprite sprite = all[i];
+                if (!sprite.isVisible()) continue;
+                setRenderModeState(sprite.renderMode(), sprite.sourceRatio(), sprite.destinationRatio());
+                super.setFlipMode(sprite.flipMode());
+                drawImage(sprite.image(), sprite.getX(), sprite.getY(), sprite.sourceX(), sprite.sourceY(),
+                        sprite.getWidth(), sprite.getHeight());
+            }
+        } finally {
+            setRenderModeState(oldMode, oldSrc, oldDst);
+            super.setFlipMode(oldFlip);
+        }
+    }
+
+    public int getSyncUnlockInterval() { return SYNC_INTERVAL_US; }
+
     public int syncUnlock(int interval) {
-        if (interval < 0) throw new IllegalArgumentException("negative interval");
+        if (interval <= 0) throw new IllegalArgumentException("interval must be positive");
+        if (!hasActiveLock()) return 0;
+        if (!canPresentLockedSurface()) return 0;
+
+        long now = nowMicros();
+        int actual;
+        long target;
+        if (!syncStarted) {
+            actual = 1;
+            target = now + SYNC_INTERVAL_US;
+        } else {
+            long elapsed = now - syncTargetMicros;
+            if (elapsed < 0) elapsed = 0;
+            if (elapsed < (long)interval * SYNC_INTERVAL_US) {
+                actual = interval;
+            } else {
+                long cycles = elapsed / SYNC_INTERVAL_US + 1L;
+                actual = cycles > Integer.MAX_VALUE ? Integer.MAX_VALUE : (int)cycles;
+            }
+            target = syncTargetMicros + (long)actual * SYNC_INTERVAL_US;
+        }
+
+        waitUntilMicros(target);
+        syncStarted = true;
+        syncTargetMicros = target;
         unlock(true);
-        return 0;
+        return actual;
     }
 
-    /**
-     * N 系列 DoJa 把 affine drawImage 視為獨立路徑，不套 setRenderMode()。
-     * 照這個規則處理可避免旋轉圖片意外吃到前一次的 ADD/SUB 狀態。
-     */
     public void drawImage(Image image, AffineTrans at) {
-        if (image == null) return;
+        if (image == null || at == null) throw new NullPointerException();
+        ensureImageAlive(image);
         drawAffine(image, at, 0, 0, image.getWidth(), image.getHeight());
     }
 
     public void drawImage(Image image, AffineTrans at, int sx, int sy, int width, int height) {
+        if (image == null || at == null) throw new NullPointerException();
+        if (width < 0 || height < 0) throw new IllegalArgumentException("negative source size");
+        ensureImageAlive(image);
+        if (width == 0 || height == 0) return;
         drawAffine(image, at, sx, sy, width, height);
     }
 
     private void drawAffine(Image image, AffineTrans at, int sx, int sy, int sw, int sh) {
         ensureSurface();
-        if (image == null || at == null) throw new NullPointerException();
-        if (sw <= 0 || sh <= 0) return;
-        int iw = image.getWidth(), ih = image.getHeight();
-        if (sx < 0) { sw += sx; sx = 0; }
-        if (sy < 0) { sh += sy; sy = 0; }
-        if (sx + sw > iw) sw = iw - sx;
-        if (sy + sh > ih) sh = ih - sy;
-        if (sw <= 0 || sh <= 0) return;
+        int iw = image.getWidth();
+        int ih = image.getHeight();
+        long sourceRight = (long)sx + sw;
+        long sourceBottom = (long)sy + sh;
+        int csx = sx < 0 ? 0 : sx;
+        int csy = sy < 0 ? 0 : sy;
+        int cr = sourceRight > iw ? iw : (int)sourceRight;
+        int cb = sourceBottom > ih ? ih : (int)sourceBottom;
+        if (csx >= cr || csy >= cb) return;
+        int cw = cr - csx;
+        int ch = cb - csy;
 
-        long det = (long)at.m00 * at.m11 - (long)at.m01 * at.m10;
-        if (det == 0) return;
+        long determinant = (long)at.m00 * at.m11 - (long)at.m01 * at.m10;
+        if (determinant == 0) return;
 
-        int x0 = tx(at, 0, 0), y0 = ty(at, 0, 0);
-        int x1 = tx(at, sw, 0), y1 = ty(at, sw, 0);
-        int x2 = tx(at, 0, sh), y2 = ty(at, 0, sh);
-        int x3 = tx(at, sw, sh), y3 = ty(at, sw, sh);
-        int minX = min4(x0,x1,x2,x3) - 1;
-        int maxX = max4(x0,x1,x2,x3) + 1;
-        int minY = min4(y0,y1,y2,y3) - 1;
-        int maxY = max4(y0,y1,y2,y3) + 1;
+        int x0 = transformX(at, csx, csy), y0 = transformY(at, csx, csy);
+        int x1 = transformX(at, cr, csy), y1 = transformY(at, cr, csy);
+        int x2 = transformX(at, csx, cb), y2 = transformY(at, csx, cb);
+        int x3 = transformX(at, cr, cb), y3 = transformY(at, cr, cb);
+        int minX = min4(x0, x1, x2, x3) - 1;
+        int maxX = max4(x0, x1, x2, x3) + 1;
+        int minY = min4(y0, y1, y2, y3) - 1;
+        int maxY = max4(y0, y1, y2, y3) + 1;
 
         int clipX = midpGraphics.getClipX();
         int clipY = midpGraphics.getClipY();
@@ -126,94 +235,224 @@ public class Graphics2 extends Graphics {
         if (maxY > clipB) maxY = clipB;
         if (minX > maxX || minY > maxY) return;
 
-        long sourceCount = (long)sw * sh;
-        if (sourceCount > Integer.MAX_VALUE) throw new IllegalArgumentException("image region too large");
-        int count = (int)sourceCount;
+        int count = checkedPixelCount(cw, ch);
         if (affineSource == null || affineSource.length < count) affineSource = new int[count];
-        javax.microedition.lcdui.Image src = image.getMIDPImage();
-        if (src == null) return;
-        src.getRGB(affineSource, 0, sw, sx, sy, sw, sh);
+        image.getMIDPImage().getRGB(affineSource, 0, cw, csx, csy, cw, ch);
         for (int i = 0; i < count; i++) affineSource[i] = prepareImagePixel(image, affineSource[i]);
 
         int rowWidth = maxX - minX + 1;
         if (affineRow == null || affineRow.length < rowWidth) affineRow = new int[rowWidth];
+
+        long den = determinant;
+        int determinantSign = 1;
+        if (den < 0) { den = -den; determinantSign = -1; }
+
+        long qx = 4096L * minX - at.m02;
+        long qy = 4096L * minY - at.m12;
+        long startUN = determinantSign * ((long)at.m11 * qx - (long)at.m01 * qy);
+        long startVN = determinantSign * (-(long)at.m10 * qx + (long)at.m00 * qy);
+        long stepXUN = determinantSign * ((long)at.m11 * 4096L);
+        long stepXVN = determinantSign * (-(long)at.m10 * 4096L);
+        long stepYUN = determinantSign * (-(long)at.m01 * 4096L);
+        long stepYVN = determinantSign * ((long)at.m00 * 4096L);
+
+        long rowU = floorDivPositive(startUN, den);
+        long rowUR = startUN - rowU * den;
+        long rowV = floorDivPositive(startVN, den);
+        long rowVR = startVN - rowV * den;
+        long stepXU = floorDivPositive(stepXUN, den);
+        long stepXUR = stepXUN - stepXU * den;
+        long stepXV = floorDivPositive(stepXVN, den);
+        long stepXVR = stepXVN - stepXV * den;
+        long stepYU = floorDivPositive(stepYUN, den);
+        long stepYUR = stepYUN - stepYU * den;
+        long stepYV = floorDivPositive(stepYVN, den);
+        long stepYVR = stepYVN - stepYV * den;
+
         for (int dy = minY; dy <= maxY; dy++) {
-            for (int dx = minX; dx <= maxX; dx++) {
-                long qx = dx - (long)at.m03;
-                long qy = dy - (long)at.m13;
-                long nu = 4096L * ((long)at.m11 * qx - (long)at.m01 * qy);
-                long nv = 4096L * (-(long)at.m10 * qx + (long)at.m00 * qy);
-                int u = floorDiv(nu, det);
-                int v = floorDiv(nv, det);
-                affineRow[dx - minX] = (u >= 0 && v >= 0 && u < sw && v < sh)
-                        ? affineSource[v * sw + u] : 0;
+            long u = rowU, ur = rowUR;
+            long v = rowV, vr = rowVR;
+            for (int i = 0; i < rowWidth; i++) {
+                if (u >= csx && u < cr && v >= csy && v < cb) {
+                    affineRow[i] = affineSource[((int)v - csy) * cw + ((int)u - csx)];
+                } else {
+                    affineRow[i] = 0;
+                }
+                u += stepXU;
+                ur += stepXUR;
+                if (ur >= den) { ur -= den; u++; }
+                v += stepXV;
+                vr += stepXVR;
+                if (vr >= den) { vr -= den; v++; }
             }
-            drawRGBReplacement(affineRow, 0, rowWidth, minX, dy, rowWidth, 1, true);
+            drawRGBComposite(affineRow, 0, rowWidth, minX, dy, rowWidth, 1, true);
+            rowU += stepYU;
+            rowUR += stepYUR;
+            if (rowUR >= den) { rowUR -= den; rowU++; }
+            rowV += stepYV;
+            rowVR += stepYVR;
+            if (rowVR >= den) { rowVR -= den; rowV++; }
         }
     }
 
-    private static int tx(AffineTrans a, int x, int y) {
-        return (int)(((long)a.m00 * x + (long)a.m01 * y + 2048L) >> 12) + a.m03;
+    private static int transformX(AffineTrans at, int x, int y) {
+        return (int)(((long)at.m00 * x + (long)at.m01 * y + at.m02) >> 12);
     }
-    private static int ty(AffineTrans a, int x, int y) {
-        return (int)(((long)a.m10 * x + (long)a.m11 * y + 2048L) >> 12) + a.m13;
-    }
-    private static int floorDiv(long n, long d) {
-        if (d < 0) { n = -n; d = -d; }
-        if (n >= 0) return (int)(n / d);
-        return (int)(-((-n + d - 1) / d));
-    }
-    private static int min4(int a,int b,int c,int d) { int m=a<b?a:b; if(c<m)m=c; if(d<m)m=d; return m; }
-    private static int max4(int a,int b,int c,int d) { int m=a>b?a:b; if(c>m)m=c; if(d>m)m=d; return m; }
 
-    public void drawImage(Image img, int x, int y) { super.drawImage(img, c(x), c(y)); }
-    public void drawImage(Image img, int dx, int dy, int sx, int sy, int width, int height) {
-        super.drawImage(img, c(dx), c(dy), c(sx), c(sy), c(width), c(height));
+    private static int transformY(AffineTrans at, int x, int y) {
+        return (int)(((long)at.m10 * x + (long)at.m11 * y + at.m12) >> 12);
     }
-    public void drawScaledImage(Image img, int dx, int dy, int dw, int dh, int sx, int sy, int sw, int sh) {
-        super.drawScaledImage(img, c(dx), c(dy), c(dw), c(dh), c(sx), c(sy), c(sw), c(sh));
+
+    private static long floorDivPositive(long value, long positiveDenominator) {
+        if (value >= 0) return value / positiveDenominator;
+        return -((-value + positiveDenominator - 1) / positiveDenominator);
     }
-    public void drawString(String str, int x, int y) { super.drawString(str, c(x), c(y)); }
-    public void drawChars(char[] data, int x, int y, int off, int len) { super.drawChars(data, c(x), c(y), off, len); }
-    public void drawLine(int x1, int y1, int x2, int y2) { super.drawLine(c(x1), c(y1), c(x2), c(y2)); }
-    public void drawRect(int x, int y, int w, int h) { super.drawRect(c(x), c(y), c(w), c(h)); }
-    public void fillRect(int x, int y, int w, int h) { super.fillRect(c(x), c(y), c(w), c(h)); }
-    public void clearRect(int x, int y, int w, int h) { super.clearRect(c(x), c(y), c(w), c(h)); }
-    public void drawArc(int x, int y, int w, int h, int start, int arc) { super.drawArc(c(x), c(y), c(w), c(h), start, arc); }
-    public void fillArc(int x, int y, int w, int h, int start, int arc) { super.fillArc(c(x), c(y), c(w), c(h), start, arc); }
-    public void copyArea(int sx, int sy, int w, int h, int dx, int dy) { super.copyArea(c(sx), c(sy), c(w), c(h), c(dx), c(dy)); }
-    public void setPixel(int x, int y) { super.setPixel(c(x), c(y)); }
-    public void setPixel(int x, int y, int color) { super.setPixel(c(x), c(y), color); }
-    public void setRGBPixel(int x, int y, int pixel) { super.setRGBPixel(c(x), c(y), pixel); }
-    public int getPixel(int x, int y) { return super.getPixel(c(x), c(y)); }
-    public int getRGBPixel(int x, int y) { return super.getRGBPixel(c(x), c(y)); }
+
+    private static int checkedPixelCount(int width, int height) {
+        long count = (long)width * height;
+        if (count > Integer.MAX_VALUE) throw new IllegalArgumentException("image region too large");
+        return (int)count;
+    }
+
+    private static int min4(int a, int b, int c, int d) { int m = a < b ? a : b; if (c < m) m = c; if (d < m) m = d; return m; }
+    private static int max4(int a, int b, int c, int d) { int m = a > b ? a : b; if (c > m) m = c; if (d > m) m = d; return m; }
+
+    private static void ensureImageAlive(Image image) {
+        if (image.getMIDPImage() == null) throw new UIException(UIException.ILLEGAL_STATE, "disposed image");
+    }
+
+    private static long nowMicros() { return System.currentTimeMillis() * 1000L; }
+
+    private static void waitUntilMicros(long target) {
+        for (;;) {
+            long remaining = target - nowMicros();
+            if (remaining <= 0) return;
+            long millis = remaining / 1000L;
+            if (millis <= 0) millis = 1;
+            try { Thread.sleep(millis); }
+            catch (InterruptedException ignored) {}
+        }
+    }
+
+    /* The normal coordinate mode deliberately adds only one branch per API call. */
+    public void drawImage(Image image, int x, int y) {
+        if (coordinateMode == CM_NORMAL) { super.drawImage(image, x, y); return; }
+        super.drawImage(image, zoomX(x), zoomY(y));
+    }
+
+    public void drawImage(Image image, int dx, int dy, int sx, int sy, int width, int height) {
+        if (coordinateMode == CM_NORMAL) { super.drawImage(image, dx, dy, sx, sy, width, height); return; }
+        super.drawImage(image, zoomX(dx), zoomY(dy), sx, sy, width, height);
+    }
+
+    public void drawScaledImage(Image image, int dx, int dy, int dw, int dh,
+            int sx, int sy, int sw, int sh) {
+        if (coordinateMode == CM_NORMAL) {
+            super.drawScaledImage(image, dx, dy, dw, dh, sx, sy, sw, sh);
+            return;
+        }
+        super.drawScaledImage(image, zoomX(dx), zoomY(dy), zoomSpanX(dx, dw), zoomSpanY(dy, dh), sx, sy, sw, sh);
+    }
+
+    public void drawString(String str, int x, int y) {
+        if (coordinateMode == CM_NORMAL) { super.drawString(str, x, y); return; }
+        super.drawString(str, zoomX(x), zoomY(y));
+    }
+
+    public void drawChars(char[] data, int x, int y, int off, int len) {
+        if (coordinateMode == CM_NORMAL) { super.drawChars(data, x, y, off, len); return; }
+        super.drawChars(data, zoomX(x), zoomY(y), off, len);
+    }
+
+    public void drawLine(int x1, int y1, int x2, int y2) {
+        if (coordinateMode == CM_NORMAL) { super.drawLine(x1, y1, x2, y2); return; }
+        super.drawLine(zoomX(x1), zoomY(y1), zoomX(x2), zoomY(y2));
+    }
+
+    public void drawRect(int x, int y, int width, int height) {
+        if (coordinateMode == CM_NORMAL) { super.drawRect(x, y, width, height); return; }
+        super.drawRect(zoomX(x), zoomY(y), zoomSpanX(x, width), zoomSpanY(y, height));
+    }
+
+    public void fillRect(int x, int y, int width, int height) {
+        if (coordinateMode == CM_NORMAL) { super.fillRect(x, y, width, height); return; }
+        super.fillRect(zoomX(x), zoomY(y), zoomSpanX(x, width), zoomSpanY(y, height));
+    }
+
+    public void clearRect(int x, int y, int width, int height) {
+        if (coordinateMode == CM_NORMAL) { super.clearRect(x, y, width, height); return; }
+        super.clearRect(zoomX(x), zoomY(y), zoomSpanX(x, width), zoomSpanY(y, height));
+    }
+
+    public void drawArc(int x, int y, int width, int height, int startAngle, int arcAngle) {
+        if (coordinateMode == CM_NORMAL) { super.drawArc(x, y, width, height, startAngle, arcAngle); return; }
+        super.drawArc(zoomX(x), zoomY(y), zoomSpanX(x, width), zoomSpanY(y, height), startAngle, arcAngle);
+    }
+
+    public void fillArc(int x, int y, int width, int height, int startAngle, int arcAngle) {
+        if (coordinateMode == CM_NORMAL) { super.fillArc(x, y, width, height, startAngle, arcAngle); return; }
+        super.fillArc(zoomX(x), zoomY(y), zoomSpanX(x, width), zoomSpanY(y, height), startAngle, arcAngle);
+    }
+
+    public void copyArea(int x, int y, int width, int height, int dx, int dy) {
+        if (coordinateMode == CM_NORMAL) { super.copyArea(x, y, width, height, dx, dy); return; }
+        int zx = zoomX(x);
+        int zy = zoomY(y);
+        int zw = zoomSpanX(x, width);
+        int zh = zoomSpanY(y, height);
+        int zdx = zoomPhysicalX(x + dx) - zoomPhysicalX(x);
+        int zdy = zoomPhysicalY(y + dy) - zoomPhysicalY(y);
+        super.copyArea(zx, zy, zw, zh, zdx, zdy);
+    }
+
+    public void setPixel(int x, int y) {
+        if (coordinateMode == CM_NORMAL) { super.setPixel(x, y); return; }
+        super.setPixel(zoomX(x), zoomY(y));
+    }
+
+    public void setPixel(int x, int y, int color) {
+        if (coordinateMode == CM_NORMAL) { super.setPixel(x, y, color); return; }
+        super.setPixel(zoomX(x), zoomY(y), color);
+    }
+
+    public void setRGBPixel(int x, int y, int pixel) {
+        if (coordinateMode == CM_NORMAL) { super.setRGBPixel(x, y, pixel); return; }
+        super.setRGBPixel(zoomX(x), zoomY(y), pixel);
+    }
 
     public void drawPolyline(int[] xs, int[] ys, int count) { drawPolyline(xs, ys, 0, count); }
-    public void drawPolyline(int[] xs, int[] ys, int off, int count) {
-        if (coordinateMode == CM_NORMAL) { super.drawPolyline(xs, ys, off, count); return; }
-        scalePoints(xs, ys, off, count);
+
+    public void drawPolyline(int[] xs, int[] ys, int offset, int count) {
+        if (coordinateMode == CM_NORMAL) { super.drawPolyline(xs, ys, offset, count); return; }
+        zoomPoints(xs, ys, offset, count);
         super.drawPolyline(coordScratchX, coordScratchY, 0, count);
     }
 
     public void fillPolygon(int[] xs, int[] ys, int count) { fillPolygon(xs, ys, 0, count); }
-    public void fillPolygon(int[] xs, int[] ys, int off, int count) {
-        if (coordinateMode == CM_NORMAL) { super.fillPolygon(xs, ys, off, count); return; }
-        scalePoints(xs, ys, off, count);
+
+    public void fillPolygon(int[] xs, int[] ys, int offset, int count) {
+        if (coordinateMode == CM_NORMAL) { super.fillPolygon(xs, ys, offset, count); return; }
+        zoomPoints(xs, ys, offset, count);
         super.fillPolygon(coordScratchX, coordScratchY, 0, count);
     }
 
-    private void scalePoints(int[] xs, int[] ys, int off, int count) {
+    private void zoomPoints(int[] xs, int[] ys, int offset, int count) {
         if (xs == null || ys == null) throw new NullPointerException();
-        if (off < 0 || count < 0 || off + count > xs.length || off + count > ys.length) {
+        if (offset < 0 || count < 0 || offset + count > xs.length || offset + count > ys.length) {
             throw new ArrayIndexOutOfBoundsException();
         }
         if (coordScratchX == null || coordScratchX.length < count) coordScratchX = new int[count];
         if (coordScratchY == null || coordScratchY.length < count) coordScratchY = new int[count];
         for (int i = 0; i < count; i++) {
-            coordScratchX[i] = xs[off + i] >> 8;
-            coordScratchY[i] = ys[off + i] >> 8;
+            coordScratchX[i] = zoomX(xs[offset + i]);
+            coordScratchY[i] = zoomY(ys[offset + i]);
         }
     }
 
-    private int c(int value) { return coordinateMode == CM_ZOOM ? value >> 8 : value; }
+    private int zoomPhysicalX(int value) { return (int)(((long)value + logicalOriginX) >> 8); }
+    private int zoomPhysicalY(int value) { return (int)(((long)value + logicalOriginY) >> 8); }
+    private int zoomX(int value) { return zoomPhysicalX(value) - getOriginX(); }
+    private int zoomY(int value) { return zoomPhysicalY(value) - getOriginY(); }
+    private int zoomSpanX(int start, int length) { return zoomPhysicalX(start + length) - zoomPhysicalX(start); }
+    private int zoomSpanY(int start, int length) { return zoomPhysicalY(start + length) - zoomPhysicalY(start); }
 }

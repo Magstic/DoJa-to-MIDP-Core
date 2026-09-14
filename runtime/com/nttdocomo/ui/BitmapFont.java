@@ -221,7 +221,7 @@ final class BitmapFont {
         if (width <= 0) return 0;
         if (width > MAX_WIDTH) width = MAX_WIDTH;
         glyphOff = idx * BYTES_PER_GLYPH;
-        if (((argb >>> 24) & 0xFF) >= 255 && g.renderMode == 0) {
+        if (((argb >>> 24) & 0xFF) >= 255 && g.isNativeRenderFastPath()) {
             javax.microedition.lcdui.Graphics mg = g.getMIDPGraphics();
             mg.setColor(argb & 0x00FFFFFF);
             for (row = 0; row < height; row++) {

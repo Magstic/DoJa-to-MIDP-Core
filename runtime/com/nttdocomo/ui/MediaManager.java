@@ -52,6 +52,13 @@ public class MediaManager {
         return ((BasicMediaImage)image).openEncodedStream();
     }
 
+
+    public static boolean isImageUsed(MediaImage image) {
+        if (image == null) return false;
+        if (image instanceof BasicMediaImage) return ((BasicMediaImage)image).used;
+        return image.getImage() != null;
+    }
+
     /** 提供 drawNthImage() 讀取 GIF 畫面幀的專用 API */
     public static Image getImageFrame(MediaImage image, int frame) {
         if (image == null) throw new NullPointerException("image");
@@ -76,9 +83,11 @@ public class MediaManager {
         private GifAnimation animation;
         private int cachedFrame = -1;
         private Image cachedFrameImage;
+        private boolean used;
         BasicMediaImage(byte[] bytes, String path) { data = bytes; resourcePath = path; encodedCache = bytes; }
 
         public void use() {
+            used = true;
             if (dojaImage != null) return;
             try {
                 if (data != null) {
