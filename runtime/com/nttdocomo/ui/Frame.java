@@ -38,7 +38,12 @@ public abstract class Frame {
     public final int __midpGameAction(int keyCode) {
         try { return host.getGameAction(keyCode); } catch (Exception ignored) { return 0; }
     }
-    public final void __midpPresent() { host.present(); }
+    public final void __midpPresent() {
+        PhoneSystem.__midpRefreshVibration();
+        host.present();
+    }
+    public final int __midpPhysicalWidth() { return host.getWidth(); }
+    public final int __midpPhysicalHeight() { return host.getHeight(); }
 
     /** MIDP host 從這兩個入口把按鍵事件送回遊戲 Frame。 */
     public void __midpKeyPressed(int keyCode) {}

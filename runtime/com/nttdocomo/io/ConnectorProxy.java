@@ -364,7 +364,10 @@ public final class ConnectorProxy {
     private static final class HttpConnectionAdapter implements HttpConnection {
         private final String uri; private final int mode; private final boolean timeouts; private javax.microedition.io.HttpConnection delegate;
         HttpConnectionAdapter(String uri,int mode,boolean timeouts){this.uri=uri;this.mode=mode;this.timeouts=timeouts;}
-        public void setRequestMethod(String method)throws IOException{ensureOpen().setRequestMethod(method);} public void connect()throws IOException{ensureOpen();}
+        public void setRequestMethod(String method)throws IOException{ensureOpen().setRequestMethod(method);}
+        public void setRequestProperty(String key,String value)throws IOException{ensureOpen().setRequestProperty(key,value);}
+        public void connect()throws IOException{ensureOpen();}
+        public int getResponseCode()throws IOException{return ensureOpen().getResponseCode();}
         public InputStream openInputStream()throws IOException{return ensureOpen().openInputStream();} public DataInputStream openDataInputStream()throws IOException{return ensureOpen().openDataInputStream();}
         public OutputStream openOutputStream()throws IOException{return ensureOpen().openOutputStream();} public DataOutputStream openDataOutputStream()throws IOException{return ensureOpen().openDataOutputStream();}
         public String getType(){try{return ensureOpen().getType();}catch(IOException ignored){return null;}} public String getEncoding(){try{return ensureOpen().getEncoding();}catch(IOException ignored){return null;}}

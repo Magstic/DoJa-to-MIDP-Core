@@ -60,6 +60,16 @@ public class Graphics {
     private int[] destinationRatioLut;
     private int ratioLutSource = -1;
     private int ratioLutDestination = -1;
+    /*
+    * DoJa 5.x 支援全圖 256 階半透明，但 MIDP 只支援「完全透明/不透明」。
+    * 如果直接把 setAlpha() 給 MIDP 的 drawRGB() 處理，在嚴格的實作上圖片會直接消失。
+    * 
+    * 現在改用軟體混合模式。這兩個 LUT 會先算好當前透明度的顏色比重，供每格畫面重複使用。
+    * 這能在核心的繪圖迴圈中，幫每個不透明像素省下 3 次昂貴的乘法運算！
+    */
+    private int[] imageAlphaSourceLut;
+    private int[] imageAlphaDestinationLut;
+    private int imageAlphaLutValue = -1;
     private javax.microedition.lcdui.Image textMaskImage;
     private javax.microedition.lcdui.Graphics textMaskGraphics;
     private int textMaskWidth;
@@ -162,7 +172,16 @@ public class Graphics {
             while (lockCount != 0) {
                 try { wait(); } catch (InterruptedException ignored) {}
             }
-            g.drawImage(backBuffer, 0, 0,
+            int physicalWidth = parentCanvas == null ? backBuffer.getWidth() : parentCanvas.__midpPhysicalWidth();
+            int physicalHeight = parentCanvas == null ? backBuffer.getHeight() : parentCanvas.__midpPhysicalHeight();
+            int x = (physicalWidth - backBuffer.getWidth()) / 2;
+            int y = (physicalHeight - backBuffer.getHeight()) / 2;
+            if (x != 0 || y != 0) {
+                int background = parentCanvas == null ? 0 : parentCanvas.getBackground();
+                g.setColor(background & 0x00FFFFFF);
+                g.fillRect(0, 0, physicalWidth, physicalHeight);
+            }
+            g.drawImage(backBuffer, x, y,
                 javax.microedition.lcdui.Graphics.TOP | javax.microedition.lcdui.Graphics.LEFT);
         }
     }
@@ -420,25 +439,47 @@ public class Graphics {
 
         javax.microedition.lcdui.Image src = img.getMIDPImage();
         if (src == null) return;
-        if (nativeRenderFastPath && imageAlpha >= 255 && sw == dw && sh == dh) {
-            if (flipMode == FLIP_NONE) {
-                int cx = midpGraphics.getClipX();
-                int cy = midpGraphics.getClipY();
-                int cw = midpGraphics.getClipWidth();
-                int ch = midpGraphics.getClipHeight();
-                midpGraphics.clipRect(dx, dy, dw, dh);
-                midpGraphics.drawImage(src, dx - sx, dy - sy,
-                    javax.microedition.lcdui.Graphics.TOP | javax.microedition.lcdui.Graphics.LEFT);
-                midpGraphics.setClip(cx, cy, cw, ch);
-                return;
+
+        /*
+        * 一般 DoJa 繪圖 **必須** 直接走 MIDP 的原生繪製！
+        * 筆記：禁止為了模擬 Image.setAlpha()，就把畫面 (framebuffer) 讀出來改完，再用 drawRGB 貼回去。
+        * 即便是 N86 或 K800i 這種頂尖裝置，在這種像素級 API 的實作上也極慢！
+        * 
+        * 這裡使用在第一次用到時，才延遲快取 (Lazy Cache) 一份『預先處理好透明度的不可變圖片副本』。
+        * - 只支援開/關透明的手機：這份副本會使用『棋盤格抖動』來模擬半透明效果（靈感來自《吸血鬼的黎明》）。
+        * - 支援真實半透明的手機：副本則直接保存精確的 ARGB 半透明顏色值。
+        */
+        if (nativeRenderFastPath && sw == dw && sh == dh) {
+            javax.microedition.lcdui.Image nativeSrc = src;
+            if (imageAlpha < 255) {
+                nativeSrc = img.getMIDPAlphaRenderImage(src);
             }
-            try {
-                midpGraphics.drawRegion(src, sx, sy, sw, sh, toMIDPTransform(flipMode), dx, dy,
-                    javax.microedition.lcdui.Graphics.TOP | javax.microedition.lcdui.Graphics.LEFT);
-                return;
-            } catch (Throwable ignored) {
-                // 有些 MIDP 的 drawRegion 會直接失敗；改走下面的小 buffer 路徑，至少結果仍可預期。
+            if (nativeSrc != null) {
+                if (flipMode == FLIP_NONE) {
+                    int cx = midpGraphics.getClipX();
+                    int cy = midpGraphics.getClipY();
+                    int cw = midpGraphics.getClipWidth();
+                    int ch = midpGraphics.getClipHeight();
+                    midpGraphics.clipRect(dx, dy, dw, dh);
+                    midpGraphics.drawImage(nativeSrc, dx - sx, dy - sy,
+                        javax.microedition.lcdui.Graphics.TOP | javax.microedition.lcdui.Graphics.LEFT);
+                    midpGraphics.setClip(cx, cy, cw, ch);
+                    return;
+                }
+                try {
+                    midpGraphics.drawRegion(nativeSrc, sx, sy, sw, sh, toMIDPTransform(flipMode), dx, dy,
+                        javax.microedition.lcdui.Graphics.TOP | javax.microedition.lcdui.Graphics.LEFT);
+                    return;
+                } catch (Throwable ignored) {
+                }
             }
+        }
+
+        /* 可變動 (Mutable) 或經過縮放 (Scaled) 的圖片，不能直接使用之前快取的『不可變圖片副本』！ */
+        if (nativeRenderFastPath && imageAlpha < 255 && sw == dw && sh == dh
+                && flipMode == FLIP_NONE) {
+            drawUnscaledAlphaImage(src, img, dx, dy, sx, sy, sw, sh, imageAlpha);
+            return;
         }
 
         drawNativeStreaming(src, img, dx, dy, sx, sy, sw, sh, dw, dh);
@@ -511,7 +552,8 @@ public class Graphics {
                     fillScratch[outX] = applyImageAlpha(pixel, imageAlpha, colourKey, transparent);
                 }
             }
-            drawRGBComposite(fillScratch, 0, outW, dx, dy + outY, outW, 1, true);
+            drawPreparedImagePixels(fillScratch, 0, outW, dx, dy + outY, outW, 1,
+                    nativeRenderFastPath && imageAlpha < 255);
         }
     }
 
@@ -563,7 +605,8 @@ public class Graphics {
                     }
                 }
             }
-            drawRGBComposite(fillScratch, 0, outW, dx, dy + outY, outW, bh, true);
+            drawPreparedImagePixels(fillScratch, 0, outW, dx, dy + outY, outW, bh,
+                    nativeRenderFastPath && imageAlpha < 255);
         }
     }
 
@@ -625,8 +668,178 @@ public class Graphics {
                     }
                 }
             }
-            drawRGBComposite(fillScratch, 0, outW, dx, dy + outY, outW, bh, true);
+            drawPreparedImagePixels(fillScratch, 0, outW, dx, dy + outY, outW, bh,
+                    nativeRenderFastPath && imageAlpha < 255);
         }
+    }
+
+    /**
+     * 為『1:1 原尺寸、無翻轉』的一般圖片使用的 DoJa-5 高速半透明合成器。
+     * 第一次執行完成後，就不會再建立任何新物件（Zero Allocation，完全不給 GC 壓力）。
+     * 來源與目標畫面會拆分成有邊界的「小區塊 (Tiles)」分段處理，即使處理大圖，RAM 也能保持恆定。
+     */
+    private void drawUnscaledAlphaImage(javax.microedition.lcdui.Image src, Image image,
+            int dx, int dy, int sx, int sy, int width, int height, int imageAlpha) {
+        int clipX = midpGraphics.getClipX();
+        int clipY = midpGraphics.getClipY();
+        int clipR = clipX + midpGraphics.getClipWidth();
+        int clipB = clipY + midpGraphics.getClipHeight();
+        int left = dx > clipX ? dx : clipX;
+        int top = dy > clipY ? dy : clipY;
+        int right = dx + width < clipR ? dx + width : clipR;
+        int bottom = dy + height < clipB ? dy + height : clipB;
+        int physL = left + originX;
+        int physT = top + originY;
+        if (physL < 0) { left -= physL; physL = 0; }
+        if (physT < 0) { top -= physT; physT = 0; }
+        if (right + originX > screenWidth) right = screenWidth - originX;
+        if (bottom + originY > screenHeight) bottom = screenHeight - originY;
+        if (left >= right || top >= bottom) return;
+
+        boolean colourKey = image.isTransparentEnabled();
+        int transparent = image.getTransparentColor() & 0x00FFFFFF;
+        prepareImageAlphaLuts(imageAlpha);
+
+        int blockW = right - left;
+        if (blockW > COMPOSITE_PIXELS) blockW = COMPOSITE_PIXELS;
+        int rowsPerBlock = COMPOSITE_PIXELS / blockW;
+        if (rowsPerBlock < 1) rowsPerBlock = 1;
+        int maxRows = bottom - top;
+        if (maxRows > rowsPerBlock) maxRows = rowsPerBlock;
+        int maxCount = blockW * maxRows;
+        ensurePixelScratch(maxCount);
+        ensureBlendScratch(maxCount);
+
+        for (int by = top; by < bottom; by += rowsPerBlock) {
+            int bh = bottom - by;
+            if (bh > rowsPerBlock) bh = rowsPerBlock;
+            for (int bx = left; bx < right; bx += blockW) {
+                int bw = right - bx;
+                if (bw > blockW) bw = blockW;
+                int srcX = sx + (bx - dx);
+                int srcY = sy + (by - dy);
+                src.getRGB(pixelScratch, 0, bw, srcX, srcY, bw, bh);
+                backBuffer.getRGB(blendScratch, 0, bw, bx + originX, by + originY, bw, bh);
+                compositeUniformAlphaTile(pixelScratch, blendScratch, bw * bh,
+                        imageAlpha, colourKey, transparent);
+                midpGraphics.drawRGB(blendScratch, 0, bw, bx, by, bw, bh, false);
+            }
+        }
+    }
+
+    /**
+     * 對已準備好的 ARGB 像素做顏色疊加（軟體渲染）。
+     * 該方法 **僅** 在圖片有做旋轉/縮放、同時 **又** 設定了半透明 (Image.setAlpha) 時才會觸發；
+     * 一般普通、不透明的精靈，依然會走原生的 drawImage/drawRegion 繪圖通道，以確保最佳效能。
+     */
+    private void drawPreparedImagePixels(int[] rgb, int offset, int scanlength,
+            int x, int y, int width, int height, boolean forceSoftwareAlpha) {
+        if (!forceSoftwareAlpha) {
+            drawRGBComposite(rgb, offset, scanlength, x, y, width, height, true);
+            return;
+        }
+        drawARGBSourceOverSoftware(rgb, offset, scanlength, x, y, width, height);
+    }
+
+    private void drawARGBSourceOverSoftware(int[] source, int offset, int scanlength,
+            int x, int y, int width, int height) {
+        int clipX = midpGraphics.getClipX();
+        int clipY = midpGraphics.getClipY();
+        int clipR = clipX + midpGraphics.getClipWidth();
+        int clipB = clipY + midpGraphics.getClipHeight();
+        int left = x > clipX ? x : clipX;
+        int top = y > clipY ? y : clipY;
+        int right = x + width < clipR ? x + width : clipR;
+        int bottom = y + height < clipB ? y + height : clipB;
+        int physL = left + originX;
+        int physT = top + originY;
+        if (physL < 0) { left -= physL; physL = 0; }
+        if (physT < 0) { top -= physT; physT = 0; }
+        if (right + originX > screenWidth) right = screenWidth - originX;
+        if (bottom + originY > screenHeight) bottom = screenHeight - originY;
+        if (left >= right || top >= bottom) return;
+
+        int blockW = right - left;
+        if (blockW > COMPOSITE_PIXELS) blockW = COMPOSITE_PIXELS;
+        int rowsPerBlock = COMPOSITE_PIXELS / blockW;
+        if (rowsPerBlock < 1) rowsPerBlock = 1;
+        int maxRows = bottom - top;
+        if (maxRows > rowsPerBlock) maxRows = rowsPerBlock;
+        ensureBlendScratch(blockW * maxRows);
+
+        for (int by = top; by < bottom; by += rowsPerBlock) {
+            int bh = bottom - by;
+            if (bh > rowsPerBlock) bh = rowsPerBlock;
+            for (int bx = left; bx < right; bx += blockW) {
+                int bw = right - bx;
+                if (bw > blockW) bw = blockW;
+                backBuffer.getRGB(blendScratch, 0, bw, bx + originX, by + originY, bw, bh);
+                compositeARGBTile(source, offset, scanlength, x, y, bx, by, bw, bh);
+                midpGraphics.drawRGB(blendScratch, 0, bw, bx, by, bw, bh, false);
+            }
+        }
+    }
+
+    private void compositeUniformAlphaTile(int[] source, int[] destination, int count,
+            int imageAlpha, boolean colourKey, int transparent) {
+        int[] srcLut = imageAlphaSourceLut;
+        int[] dstLut = imageAlphaDestinationLut;
+        for (int i = 0; i < count; i++) {
+            int src = source[i];
+            int srcAlpha = (src >>> 24) & 0xFF;
+            if (srcAlpha == 0 || (colourKey && (src & 0x00FFFFFF) == transparent)) continue;
+            int dst = destination[i];
+            if (srcAlpha == 255) {
+                int r = div255Round(srcLut[(src >>> 16) & 0xFF] + dstLut[(dst >>> 16) & 0xFF]);
+                int g = div255Round(srcLut[(src >>> 8) & 0xFF] + dstLut[(dst >>> 8) & 0xFF]);
+                int b = div255Round(srcLut[src & 0xFF] + dstLut[dst & 0xFF]);
+                destination[i] = 0xFF000000 | (r << 16) | (g << 8) | b;
+            } else {
+                int alpha = div255Round(multiplyU8(srcAlpha, imageAlpha));
+                destination[i] = sourceOverPixel(src, dst, alpha);
+            }
+        }
+    }
+
+    private void compositeARGBTile(int[] source, int offset, int scanlength,
+            int drawX, int drawY, int tileX, int tileY, int width, int height) {
+        for (int row = 0; row < height; row++) {
+            int srcRow = offset + (tileY + row - drawY) * scanlength + (tileX - drawX);
+            int dstRow = row * width;
+            for (int col = 0; col < width; col++) {
+                int src = source[srcRow + col];
+                int alpha = (src >>> 24) & 0xFF;
+                if (alpha == 0) continue;
+                int index = dstRow + col;
+                if (alpha == 255) blendScratch[index] = 0xFF000000 | (src & 0x00FFFFFF);
+                else blendScratch[index] = sourceOverPixel(src, blendScratch[index], alpha);
+            }
+        }
+    }
+
+    private static int sourceOverPixel(int src, int dst, int alpha) {
+        if (alpha <= 0) return dst;
+        if (alpha >= 255) return 0xFF000000 | (src & 0x00FFFFFF);
+        int inv = 255 - alpha;
+        int r = div255Round(multiplyU8((src >>> 16) & 0xFF, alpha)
+                + multiplyU8((dst >>> 16) & 0xFF, inv));
+        int g = div255Round(multiplyU8((src >>> 8) & 0xFF, alpha)
+                + multiplyU8((dst >>> 8) & 0xFF, inv));
+        int b = div255Round(multiplyU8(src & 0xFF, alpha)
+                + multiplyU8(dst & 0xFF, inv));
+        return 0xFF000000 | (r << 16) | (g << 8) | b;
+    }
+
+    private void prepareImageAlphaLuts(int alpha) {
+        if (imageAlphaLutValue == alpha) return;
+        if (imageAlphaSourceLut == null) imageAlphaSourceLut = new int[256];
+        if (imageAlphaDestinationLut == null) imageAlphaDestinationLut = new int[256];
+        int inv = 255 - alpha;
+        for (int i = 0; i < 256; i++) {
+            imageAlphaSourceLut[i] = multiplyU8(i, alpha);
+            imageAlphaDestinationLut[i] = multiplyU8(i, inv);
+        }
+        imageAlphaLutValue = alpha;
     }
 
     private void prepareScaleMaps(int destinationWidth, int destinationHeight,

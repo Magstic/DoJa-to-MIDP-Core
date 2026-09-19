@@ -27,12 +27,12 @@ public abstract class Canvas extends Frame implements Runnable {
 
     public void __midpPaint(javax.microedition.lcdui.Graphics g) {
         if (dojaGraphics == null) {
-            SoftKeys.paint(g, this, getWidth(), getHeight());
+            SoftKeys.paint(g, this, __midpPhysicalWidth(), __midpPhysicalHeight());
             return;
         }
         synchronized (dojaGraphics) {
             ((Graphics)dojaGraphics).paintDisplay(g);
-            SoftKeys.paint(g, this, getWidth(), getHeight());
+            SoftKeys.paint(g, this, __midpPhysicalWidth(), __midpPhysicalHeight());
         }
     }
 

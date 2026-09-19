@@ -13,6 +13,32 @@ public class Image {
     private int transparentColor;
     private boolean transparentEnabled;
 
+    /*
+    * DoJa 5.x 支援 0~255 階的全圖半透明，但 MIDP 裝置僅支援『完全透明/不透明』。
+    * 因此針對不可變 (Immutable) 圖片，我們會在用到時延遲建立 (Lazy) 一份原生可畫的半透明副本並快取。
+    * 如此一來，最頻繁執行的繪圖主迴圈就能直接呼叫 LCDUI 原生的 drawImage/drawRegion，
+    * 這解決了回讀 Framebuffer、每格建立 ARGB 緩衝區，自實作軟體混合的不必要開銷。
+    *
+    * 系統『只會快取一種』非不透明的透明度數值，因為實際的 DoJa 遊戲通常
+    * 只是在切換特效時套用某個固定值 (RO 用 128)，做完特效再切回 255（例如《仙境傳說：紫羅蘭》）。
+    * 這樣既能降低 RAM 開銷，又能確保切回 255 後，算好的半透明副本能繼續重用。
+    */
+    private javax.microedition.lcdui.Image alphaRenderImage;
+    private javax.microedition.lcdui.Image alphaRenderSource;
+    private int alphaRenderValue = -1;
+    private boolean alphaRenderDithered;
+
+    private static final int[] BAYER_8X8 = {
+         0, 48, 12, 60,  3, 51, 15, 63,
+        32, 16, 44, 28, 35, 19, 47, 31,
+         8, 56,  4, 52, 11, 59,  7, 55,
+        40, 24, 36, 20, 43, 27, 39, 23,
+         2, 50, 14, 62,  1, 49, 13, 61,
+        34, 18, 46, 30, 33, 17, 45, 29,
+        10, 58,  6, 54,  9, 57,  5, 53,
+        42, 26, 38, 22, 41, 25, 37, 21
+    };
+
     public Image(javax.microedition.lcdui.Image img) {
         midpImage = img;
         originalImage = img;
@@ -53,6 +79,7 @@ public class Image {
     protected void setMIDPImage(javax.microedition.lcdui.Image img) {
         detachGraphics();
         releaseResource();
+        invalidateAlphaRenderImage();
         midpImage = img;
         originalImage = img;
     }
@@ -75,8 +102,82 @@ public class Image {
         transparentEnabled = enabled;
         if (resource == null) applyTransparency();
     }
-    public void setAlpha(int value) { alpha = value < 0 ? 0 : value > 255 ? 255 : value; }
+    public void setAlpha(int value) {
+        if (value < 0 || value > 255) throw new IllegalArgumentException("alpha out of range");
+        alpha = value;
+    }
     public int getAlpha() { return alpha; }
+
+    /**
+     * 回傳一張已套用好 DoJa 半透明效果的 MIDP 圖。
+     * - 唯讀圖片 (Immutable)：快取算好的半透明副本，以便重複使用。
+     * - 可變圖片 (Mutable)：直接置 NULL；
+     * 遇到可變圖片時，Graphics 會改用軟體渲染來接手繪製。
+     */
+    javax.microedition.lcdui.Image getMIDPAlphaRenderImage(javax.microedition.lcdui.Image source) {
+        int value = alpha;
+        if (value >= 255) return source;
+        if (value <= 0 || source == null) return null;
+
+        /* 第一次透明度渲染後的每幀高頻熱路徑。 */
+        if (alphaRenderImage != null && alphaRenderSource == source
+                && alphaRenderValue == value) {
+            return alphaRenderImage;
+        }
+        if (source.isMutable()) return null;
+
+        boolean dither = Display.__midpNumAlphaLevels() <= 2;
+
+        int w = source.getWidth();
+        int h = source.getHeight();
+        int count = w * h;
+        int[] pixels = new int[count];
+        source.getRGB(pixels, 0, w, 0, 0, w, h);
+
+        if (dither) {
+            /*
+            * 當 MIDP 的 numAlphaLevels() == 2 時，系統會把所有中間的半透明值直接強制變成『全透明』。
+            * 因此，這裡改用『棋盤格』。雖然是偽的，但能模擬出 65 階濃淡的半透明視覺效果。
+            */
+            for (int y = 0, i = 0; y < h; y++) {
+                int patternRow = (y & 7) << 3;
+                for (int x = 0; x < w; x++, i++) {
+                    int pixel = pixels[i];
+                    int sourceAlpha = (pixel >>> 24) & 255;
+                    if (sourceAlpha == 0) {
+                        pixels[i] = 0;
+                        continue;
+                    }
+                    int effective = (sourceAlpha * value + 127) / 255;
+                    int coverage = (effective * 64 + 127) / 255;
+                    if (BAYER_8X8[patternRow + (x & 7)] >= coverage) pixels[i] = 0;
+                    else pixels[i] = 0xFF000000 | (pixel & 0x00FFFFFF);
+                }
+            }
+        } else {
+            for (int i = 0; i < count; i++) {
+                int pixel = pixels[i];
+                int sourceAlpha = (pixel >>> 24) & 255;
+                int effective = (sourceAlpha * value + 127) / 255;
+                pixels[i] = (effective << 24) | (pixel & 0x00FFFFFF);
+            }
+        }
+
+        javax.microedition.lcdui.Image rendered =
+                javax.microedition.lcdui.Image.createRGBImage(pixels, w, h, true);
+        alphaRenderSource = source;
+        alphaRenderValue = value;
+        alphaRenderDithered = dither;
+        alphaRenderImage = rendered;
+        return rendered;
+    }
+
+    private void invalidateAlphaRenderImage() {
+        alphaRenderImage = null;
+        alphaRenderSource = null;
+        alphaRenderValue = -1;
+        alphaRenderDithered = false;
+    }
 
     public int getWidth() {
         if (resource != null) return resource.getWidth();
@@ -89,6 +190,7 @@ public class Image {
 
     public void dispose() {
         detachGraphics();
+        invalidateAlphaRenderImage();
         midpImage = null;
         originalImage = null;
         releaseResource();
@@ -104,6 +206,7 @@ public class Image {
 
     private void applyTransparency() {
         if (originalImage == null) return;
+        invalidateAlphaRenderImage();
         if (!transparentEnabled) {
             if (midpImage != originalImage) detachGraphics();
             midpImage = originalImage;
