@@ -1,7 +1,6 @@
 package com.nttdocomo.ui;
 
 import doja.Resources;
-import doja.Sjis;
 
 import java.io.DataInputStream;
 import java.io.IOException;
@@ -19,7 +18,7 @@ final class BitmapFont {
     private static byte[] glyphData;
     private static final int BYTES_PER_GLYPH = 24; /* 12 列，每列為一個 uint16 bit mask。 */
     private static final int MAX_WIDTH = 16;
-    private static final int[] scratch = new int[MAX_WIDTH * 16];
+    private static int[] scratch = new int[MAX_WIDTH * 12];
     private static byte[] asciiAdvancePlus;
 
     private BitmapFont() {}
@@ -48,7 +47,6 @@ final class BitmapFont {
         int i;
         ensureLoaded();
         if (!loaded || s == null) return false;
-        s = normalizeText(s);
         for (i = 0; i < s.length(); i++) {
             char c = s.charAt(i);
             if (c == '\n' || c == '\r' || c == '\t') continue;
@@ -58,18 +56,21 @@ final class BitmapFont {
     }
 
     static int stringWidth(String s) {
+        return stringWidth(s, getHeight());
+    }
+
+    static int stringWidth(String s, int targetHeight) {
         int i;
         int w = 0;
         ensureLoaded();
         if (!loaded || s == null || s.length() == 0) return 0;
-        s = normalizeText(s);
         for (i = 0; i < s.length(); i++) {
             char c = s.charAt(i);
             if (c == '\n' || c == '\r') break;
             if (c == '\t') {
-                w += 12;
+                w += targetHeight;
             } else {
-                w += charWidth(c);
+                w += scaledWidth(charWidth(c), targetHeight);
             }
         }
         return w;
@@ -83,9 +84,15 @@ final class BitmapFont {
             return (asciiAdvancePlus[c] & 0xff) - 1;
         }
         idx = find(c);
-        if (idx < 0) idx = find('?');
+        if (idx < 0) idx = find('\u53E3');
         if (idx < 0) return 6;
         return advances[idx] & 0xff;
+    }
+
+    private static int scaledWidth(int width, int targetHeight) {
+        if (targetHeight == height) return width;
+        if (width == 0) return 0;
+        return Math.max(1, (int)(((long)width * targetHeight + height / 2) / height));
     }
 
     static boolean drawString(Graphics g, String s, int x, int baseline, int argb, Font f) {
@@ -95,17 +102,17 @@ final class BitmapFont {
         int a;
         ensureLoaded();
         if (!loaded || g == null || s == null) return false;
-        s = normalizeText(s);
         cx = x;
         a = f == null ? ascent : f.getAscent();
+        int targetHeight = f == null ? height : f.getHeight();
         top = baseline - a;
         for (i = 0; i < s.length(); i++) {
             char c = s.charAt(i);
             if (c == '\n' || c == '\r') break;
             if (c == '\t') {
-                cx += 12;
+                cx += targetHeight;
             } else {
-                cx += drawChar(g, c, cx, top, argb);
+                cx += drawChar(g, c, cx, top, argb, targetHeight);
             }
         }
         return true;
@@ -118,7 +125,6 @@ final class BitmapFont {
         int top;
         ensureLoaded();
         if (!loaded || mg == null || s == null) return false;
-        s = normalizeText(s);
         cx = x;
         top = baseline - ascent;
         mg.setColor(argb & 0x00FFFFFF);
@@ -141,7 +147,7 @@ final class BitmapFont {
         int col;
         int mask;
         int glyphOff;
-        if (idx < 0) idx = find('?');
+        if (idx < 0) idx = find('\u53E3');
         if (idx < 0) return 6;
         width = advances[idx] & 0xff;
         if (width <= 0) return 0;
@@ -170,7 +176,6 @@ final class BitmapFont {
         int top;
         ensureLoaded();
         if (!loaded || dst == null || stride <= 0 || dstHeight <= 0 || s == null) return;
-        s = normalizeText(s);
         cx = x;
         top = baseline - ascent;
         for (i = 0; i < s.length(); i++) {
@@ -181,7 +186,7 @@ final class BitmapFont {
                 continue;
             }
             int idx = find(c);
-            if (idx < 0) idx = find('?');
+            if (idx < 0) idx = find('\u53E3');
             if (idx < 0) { cx += 6; continue; }
             int width = advances[idx] & 0xff;
             if (width > MAX_WIDTH) width = MAX_WIDTH;
@@ -202,51 +207,55 @@ final class BitmapFont {
         }
     }
 
-    /* 有些遊戲把 Shift-JIS byte 直接塞進 U+0000..U+00FF。
-     * 這會在量字和畫字前統一解碼，正常的 Unicode 字串則不受影響。 */
-    static String normalizeText(String s) {
-        return Sjis.decodePreserved(s);
-    }
-
-    private static int drawChar(Graphics g, char c, int x, int y, int argb) {
+    private static int drawChar(Graphics g, char c, int x, int y, int argb, int targetHeight) {
         int idx = find(c);
         int width;
         int row;
         int col;
         int mask;
         int glyphOff;
-        if (idx < 0) idx = find('?');
+        if (idx < 0) idx = find('\u53E3');
         if (idx < 0) return 6;
         width = advances[idx] & 0xff;
         if (width <= 0) return 0;
         if (width > MAX_WIDTH) width = MAX_WIDTH;
         glyphOff = idx * BYTES_PER_GLYPH;
+        int targetWidth = scaledWidth(width, targetHeight);
         if (((argb >>> 24) & 0xFF) >= 255 && g.isNativeRenderFastPath()) {
             javax.microedition.lcdui.Graphics mg = g.getMIDPGraphics();
             mg.setColor(argb & 0x00FFFFFF);
-            for (row = 0; row < height; row++) {
-                mask = ((glyphData[glyphOff + row * 2] & 0xff) << 8) | (glyphData[glyphOff + row * 2 + 1] & 0xff);
+            for (row = 0; row < targetHeight; row++) {
+                int sourceRow = targetHeight == height ? row : row * height / targetHeight;
+                mask = ((glyphData[glyphOff + sourceRow * 2] & 0xff) << 8)
+                        | (glyphData[glyphOff + sourceRow * 2 + 1] & 0xff);
                 col = 0;
                 while (col < width) {
                     while (col < width && (mask & (1 << (15 - col))) == 0) col++;
                     if (col < width) {
                         int run = col;
                         while (col < width && (mask & (1 << (15 - col))) != 0) col++;
-                        mg.drawLine(x + run, y + row, x + col - 1, y + row);
+                        int left = targetWidth == width ? run : (run * targetWidth + width - 1) / width;
+                        int right = targetWidth == width ? col : (col * targetWidth + width - 1) / width;
+                        if (left < right) mg.drawLine(x + left, y + row, x + right - 1, y + row);
                     }
                 }
             }
-            return width;
+            return targetWidth;
         }
+        int count = targetWidth * targetHeight;
+        if (scratch.length < count) scratch = new int[count];
         int pos = 0;
-        for (row = 0; row < height; row++) {
-            mask = ((glyphData[glyphOff + row * 2] & 0xff) << 8) | (glyphData[glyphOff + row * 2 + 1] & 0xff);
-            for (col = 0; col < width; col++) {
-                scratch[pos++] = ((mask & (1 << (15 - col))) != 0) ? argb : 0x00000000;
+        for (row = 0; row < targetHeight; row++) {
+            int sourceRow = targetHeight == height ? row : row * height / targetHeight;
+            mask = ((glyphData[glyphOff + sourceRow * 2] & 0xff) << 8)
+                    | (glyphData[glyphOff + sourceRow * 2 + 1] & 0xff);
+            for (col = 0; col < targetWidth; col++) {
+                int sourceCol = targetWidth == width ? col : col * width / targetWidth;
+                scratch[pos++] = ((mask & (1 << (15 - sourceCol))) != 0) ? argb : 0x00000000;
             }
         }
-        g.drawRGBComposite(scratch, 0, width, x, y, width, height, true);
-        return width;
+        g.drawRGBComposite(scratch, 0, targetWidth, x, y, targetWidth, targetHeight, true);
+        return targetWidth;
     }
 
     private static int find(char c) {

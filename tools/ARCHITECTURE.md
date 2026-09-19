@@ -68,11 +68,17 @@ ScratchpadBuild.java  CLI 與流程
 
 `doja.tools.jam` 解析 JAM，產生 Runtime descriptor 與 MIDP metadata
 
-`doja.tools.font` 字型拉取、明確的 FontUsage manifest、位圖字庫與按需 Shift-JIS 對照表。
+`doja.tools.font` 負責下載字型，並根據使用清單建立位圖字庫與 Shift-JIS 解碼對照表。
 
-FontBuild 不再從 TSV、Java source 或完整 Shift-JIS charset 猜測 glyph。`FontUsage` 將
-最終 render code point 與仍需 Runtime 解碼的雙 byte Shift-JIS code 分開記錄；專屬 comp
-只需把它實際理解的遊戲文字結構轉成這份通用 manifest。
+Wrapper 以 `FontUsage` 分別記錄『顯示字元』與『待解碼的 Shift-JIS 編碼』，供 FontBuild 打包。
+解碼表只收錄清單中的雙位元組編碼，字庫同步收錄其解碼結果，確保解碼後有對應字形。
+
+`GlyphResolver` 統一選用原字形或安全替代字形，保留原字元編碼。
+無可用字形時以『口』代替，並在打包日誌列出缺字；字型沒有『口』時直接產生口形位圖。
+字庫固定包含『口』，供執行期缺字時使用。
+
+半形假名、動態文字與譯文所需的字形，由 Wrapper 記入 `addRenderText`；已翻譯的文字無須加入原文解碼表。
+未列入清單的動態文字，無法在打包時檢查缺字。
 
 
 ## 公共 API

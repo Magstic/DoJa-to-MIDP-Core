@@ -5,9 +5,8 @@ import doja.tools.io.FileIO;
 import java.awt.Font;
 import java.io.File;
 import java.io.IOException;
-import java.util.Map;
 
-/** Builds two independent resources: final render glyphs and required Shift-JIS decoder mappings. */
+/** 根據使用字形的多少，建立『渲染字形』與『Shift-JIS 解碼器』資源。 */
 public final class FontBuild {
     private static final int PIXEL_SIZE = 12;
 
@@ -28,12 +27,9 @@ public final class FontBuild {
         FileIO.ensureDirectory(outDir);
 
         Font font = FontFiles.load(fontFile).deriveFont((float)PIXEL_SIZE);
-        FontUsageCollector.Result usage = FontUsageCollector.collect(font, sourceDirs);
-        Map<Integer,Integer> sjis = ShiftJisTable.build(usage.shiftJisCodes);
-
-        ShiftJisTable.write(sjis, new File(outDir, "sjis_map.bin"));
-        BitmapFontWriter.write(font, usage.glyphs, new File(outDir, "glyphs.bin"));
-        System.out.println("FontBuild: " + fontFile.getName() + ", glyphs=" + usage.glyphs.size()
-                + ", sjis=" + sjis.size());
+        FontUsageCollector.Result usage = FontUsageCollector.collect(sourceDirs);
+        int sjisCount = ShiftJisTable.write(usage.shiftJisCodes, new File(outDir, "sjis_map.bin"), usage.glyphs);
+        int glyphCount = BitmapFontWriter.write(font, usage.glyphs, new File(outDir, "glyphs.bin"));
+        System.out.println("FontBuild: " + fontFile.getName() + ", glyphs=" + glyphCount + ", sjis=" + sjisCount);
     }
 }

@@ -56,6 +56,20 @@ SoundPlayer            聲音播放狀態與 MMAPI 控制
 2. GIF 支援調色盤、透明索引、交錯掃描（Interlace）與清理方式（Disposal）。
 
 
+## 字型與文字
+
+繪字與量字使用 Unicode；Shift-JIS 文字由 Wrapper 先調用 `Sjis.decode` 解碼。
+若原始位元組存於 String，須先還原成 byte 陣列。缺少對照的雙位元組字元以『口』代替，並跳過整個字元。
+
+字庫以 12px 製作，依 Font 的高度做最近鄰縮放，量字與繪字使用相同字寬。
+Graphics 建立時取得預設 Font；SoftKeys 使用字庫原始尺寸。
+
+### 支援範圍
+
+- 支援 BMP 字元、單色字形與單一字面及樣式；不支援文字塑形或彩色圖示。
+- Tiny/Small/Medium/Large 分別為 12/14/16/20px，也可指定數值高度。
+  各 DoJa 世代的字級定義不同，適配時須確認目標 Profile（見 [DOCOMO 開發指南第 81 頁](https://www.docomo.ne.jp/english/binary/pdf/service/developer/make/content/iappli/technical_data/doja/jguidefordoja5_x_en_080527.pdf#page=81)）。
+
 ## Scratchpad
 
 Scratchpad 是一個可隨意讀寫的資料塊：

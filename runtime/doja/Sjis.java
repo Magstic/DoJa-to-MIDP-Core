@@ -4,9 +4,9 @@ import java.io.DataInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 
-/** 
+/**
  * Shift-JIS 解碼器。
- * Raw translation lookup, Shift-JIS decoding, and bitmap glyph rendering are independent stages.
+ * 優先使用譯文，未翻譯的文字再由 Shift-JIS 轉成 Unicode。
  */
 public final class Sjis {
     private static final String MAP_RESOURCE = "/font/sjis_map.bin";
@@ -42,38 +42,20 @@ public final class Sjis {
                 p++;
             } else if (isLead(b) && p + 1 < end) {
                 int trail = bytes[p + 1] & 0xff;
-                int mapped = isTrail(trail) ? map((b << 8) | trail) : 0;
-                if (mapped != 0) {
-                    out.append((char)mapped);
+                if (isTrail(trail)) {
+                    int mapped = map((b << 8) | trail);
+                    out.append(mapped != 0 ? (char)mapped : '\u53E3');
                     p += 2;
                 } else {
-                    out.append('?');
+                    out.append('\u53E3');
                     p++;
                 }
             } else {
-                out.append('?');
+                out.append('\u53E3');
                 p++;
             }
         }
         return out.toString();
-    }
-
-    /** 還原在 U+0000..U+00FF 裡的 Shift-JIS byte，一般 Unicode 內容會原樣保留。 */
-    public static String decodePreserved(String value) {
-        if (value == null || value.length() == 0) return value;
-        boolean hasPair = false;
-        int i;
-        for (i = 0; i < value.length(); i++) {
-            int c = value.charAt(i);
-            if (c > 0xff) return value;
-            if (isLead(c) && i + 1 < value.length() && isTrail(value.charAt(i + 1))) {
-                hasPair = true;
-            }
-        }
-        if (!hasPair) return value;
-        byte[] bytes = new byte[value.length()];
-        for (i = 0; i < bytes.length; i++) bytes[i] = (byte)value.charAt(i);
-        return decode(bytes);
     }
 
     private static boolean isLead(int value) {

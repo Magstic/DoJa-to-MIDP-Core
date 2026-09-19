@@ -177,7 +177,7 @@ public class Font {
 
     public int stringWidth(String s) {
         if (BitmapFont.isLoaded()) {
-            return BitmapFont.stringWidth(s == null ? "" : s);
+            return BitmapFont.stringWidth(s == null ? "" : s, height);
         }
         int w = midpFont.stringWidth(s == null ? "" : s);
         return (w * widthScalePercent + 50) / 100;

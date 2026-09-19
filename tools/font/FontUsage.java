@@ -14,10 +14,8 @@ import java.util.Set;
 import java.util.TreeSet;
 
 /**
- * Build-time text usage manifest.
- * Render code points and Shift-JIS decode codes are intentionally separate:
- * translated raw strings need render glyphs for the translation, while only
- * untranslated raw strings need Shift-JIS decoder entries.
+ * 統計上最終需要哪些字形。
+ * 最終，將結果打包位元精簡的二進位清單，以供後續的字體產生工具使用。
  */
 public final class FontUsage {
     private static final int MAGIC = 0x46555331; // FUS1
@@ -38,7 +36,7 @@ public final class FontUsage {
         }
     }
 
-    /** Adds only the double-byte codes that the Runtime decoder must resolve. */
+    /** 記錄需要查表解碼的雙位元組 Shift-JIS 編碼，供後續建立對照表。 */
     public void addShiftJisBytes(byte[] data) throws IOException {
         if (data == null) throw new NullPointerException("data");
         addShiftJisBytes(data, 0, data.length);

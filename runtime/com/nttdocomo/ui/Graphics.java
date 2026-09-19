@@ -100,6 +100,7 @@ public class Graphics {
     }
 
     public Graphics() {
+        currentFont = Font.getDefaultFont();
     }
 
     public void init(int width, int height) {
