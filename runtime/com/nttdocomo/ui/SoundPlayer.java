@@ -415,8 +415,6 @@ final class SoundPlayer implements Runnable {
                 if (failure instanceof Exception) throw (Exception)failure;
                 throw new Exception(failure.toString());
             }
-        } else {
-            try { current.stop(); } catch (Throwable ignored) {}
         }
 
         current.setLoopCount(remainingLoops < 0 ? -1 : (remainingLoops < 1 ? 1 : remainingLoops));
@@ -456,7 +454,7 @@ final class SoundPlayer implements Runnable {
     private void stopPhysicalRetain() {
         Player current;
         synchronized (this) { current = player; }
-        if (current != null) {
+        if (current != null && current.getState() == Player.STARTED) {
             try { current.stop(); } catch (Throwable ignored) {}
         }
     }
