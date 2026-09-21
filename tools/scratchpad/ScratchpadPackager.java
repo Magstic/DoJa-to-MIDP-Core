@@ -53,11 +53,10 @@ final class ScratchpadPackager {
                 if (endsWithIgnoreCase(name, ".mld")) {
                     String stem = name.substring(0, name.length() - 4);
                     SoundConverter.Result converted = SoundConverter.convert(bytes, new File(outputDir, stem), false);
-                    scratchpad.soundEntries().add(new SoundIndex.Entry(
-                            "/assets/" + three(archive.id()) + "/" + stem + converted.extension,
-                            converted.durationMillis));
-                    System.out.println("ScratchpadBuild: " + name + " -> " + stem + converted.extension
-                            + " (" + converted.durationMillis + " ms)");
+                    String resourceStem = "/assets/" + three(archive.id()) + "/" + stem;
+                    scratchpad.soundEntries().add(converted.indexEntry(resourceStem));
+                    System.out.println("ScratchpadBuild: " + name + " -> " + stem
+                            + converted.primarySuffix() + " (" + converted.suffixes.length + " segment(s))");
                 } else {
                     FileIO.write(new File(outputDir, name), bytes);
                 }

@@ -87,4 +87,8 @@ Scratchpad 是一個可隨意讀寫的資料塊：
 
 靜音時，只維持 logical clock，減輕真機的 CPU 消耗。
 
+帶有原生定點循環的 MLD 會在建置時封裝成有序 MIDI 段落。`SoundData` 統一解析段落時間軸；
+`SoundPlayer` 在同一個 worker 上依序切換，任何時刻最多持有一個 MMAPI Player。最後若只有一個
+循環段，直接由該 Player 原地循環，不再逐輪重建音訊裝置。
+
 遊戲需要 BGM / SFX 分類時，可在 Wrapper 實作 `SoundPolicy` 並交給 `AudioPresenter`。

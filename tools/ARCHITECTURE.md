@@ -54,9 +54,9 @@ SP 偏移（Offset）、Sprite 插槽與執行期索引（Runtime index）皆由
 ```text
 Scratchpad.java       提供 Logical address-space 的存取 API
 ResourceFormats.java  ZIP / GIF / BMP / PNG / MLD 掃描
-SoundConverter.java   MLD → MIDI / WAV
+SoundConverter.java   MLD → 有序 MIDI 段落 / WAV
 MidiToWav.java        MIDI → WAV（特別是 SFX 槽）
-SoundIndex.java       聲音長度索引
+SoundIndex.java       聲音段落、循環入口與長度索引
 ScratchpadPackager    baseline / archive / index 封裝
 ScratchpadBuild.java  CLI 與流程
 ```

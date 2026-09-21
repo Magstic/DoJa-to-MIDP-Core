@@ -15,16 +15,30 @@ import javax.sound.sampled.AudioSystem;
 
 import mld.api.MldConversion;
 import mld.api.MldConverter;
+import mld.api.MldMidiPlayback;
 import mld.api.MldPcm16;
 
 /** 將 MLD payload 轉成 MIDP 較容易播放的 MIDI/WAV，並順手算好實際長度。 */
 final class SoundConverter {
     static final class Result {
-        final String extension;
-        final int durationMillis;
-        Result(String extension, int durationMillis) {
-            this.extension = extension;
-            this.durationMillis = durationMillis;
+        final String[] suffixes;
+        final int[] durationsMillis;
+        final int loopSegmentIndex;
+
+        Result(String[] suffixes, int[] durationsMillis, int loopSegmentIndex) {
+            this.suffixes = suffixes;
+            this.durationsMillis = durationsMillis;
+            this.loopSegmentIndex = loopSegmentIndex;
+        }
+
+        String primarySuffix() {
+            return suffixes[0];
+        }
+
+        SoundIndex.Entry indexEntry(String resourceStem) {
+            String[] resources = new String[suffixes.length];
+            for (int i = 0; i < resources.length; i++) resources[i] = resourceStem + suffixes[i];
+            return new SoundIndex.Entry(resources[0], resources, durationsMillis, loopSegmentIndex);
         }
     }
 
@@ -38,23 +52,42 @@ final class SoundConverter {
 
         long micros;
         if (midi) {
-            Sequence sequence = conversion.createMidiSequence();
             if (forceWav) {
+                Sequence sequence = conversion.createMidiSequence();
                 int millis = MidiToWav.render(sequence, new File(stem.getPath() + ".wav"));
-                return new Result(".wav", millis);
+                return single(".wav", millis);
             }
-            File output = new File(stem.getPath() + ".mid");
-            FileIO.ensureParent(output);
-            if (MidiSystem.write(sequence, 1, output) <= 0) throw new IOException("no MIDI writer for " + output);
-            micros = sequence.getMicrosecondLength();
-            return new Result(".mid", millis(micros));
+            MldMidiPlayback playback = conversion.createMidiPlayback();
+            String[] suffixes = new String[playback.getSegmentCount()];
+            int[] durations = new int[suffixes.length];
+            for (int i = 0; i < suffixes.length; i++) {
+                suffixes[i] = segmentSuffix(i, playback.getLoopSegmentIndex(), suffixes.length);
+                Sequence sequence = playback.createSegmentSequence(i);
+                File output = new File(stem.getPath() + suffixes[i]);
+                FileIO.ensureParent(output);
+                if (MidiSystem.write(sequence, 1, output) <= 0) {
+                    throw new IOException("no MIDI writer for " + output);
+                }
+                durations[i] = millis(sequence.getMicrosecondLength());
+            }
+            return new Result(suffixes, durations, playback.getLoopSegmentIndex());
         }
 
         MldPcm16 pcm = conversion.renderSampledPcm16();
         File output = new File(stem.getPath() + ".wav");
         writeWav(pcm, output);
         micros = pcm.getFrameCount() * 1000000L / pcm.getSampleRate();
-        return new Result(".wav", millis(micros));
+        return single(".wav", millis(micros));
+    }
+
+    private static Result single(String suffix, int durationMillis) {
+        return new Result(new String[] {suffix}, new int[] {durationMillis}, -1);
+    }
+
+    private static String segmentSuffix(int index, int loopIndex, int count) {
+        if (index == 0) return ".mid";
+        if (count == 2 && index == loopIndex) return ".loop.mid";
+        return ".part" + index + ".mid";
     }
 
     private static int millis(long micros) {

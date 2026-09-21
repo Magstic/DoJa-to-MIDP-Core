@@ -34,6 +34,7 @@ final class SoundPlayer implements Runnable {
     private Player player;
     private InputStream input;
     private SoundRes loadedSound;
+    private int loadedSegment = -1;
 
     /* 遊戲可見的播放狀態，和實體 Player 分開保存。 */
     private SoundRes activeSound;
@@ -142,10 +143,7 @@ final class SoundPlayer implements Runnable {
         synchronized (this) {
             if (activeListener != listener || activeToken != token || activeSound == null) return 0;
             long timeline = currentTimelineLocked(System.currentTimeMillis());
-            int duration = activeSound.getDurationMillis();
-            if (duration > 0) timeline %= duration;
-            if (timeline < 0) timeline = 0;
-            return timeline > Integer.MAX_VALUE ? Integer.MAX_VALUE : (int)timeline;
+            return activeSound.positionAt(timeline).playlistMillis;
         }
     }
 
@@ -171,6 +169,8 @@ final class SoundPlayer implements Runnable {
 
             Listener completedOwner = null;
             int completedToken = 0;
+            Listener transitionOwner = null;
+            int transitionToken = 0;
 
             synchronized (this) {
                 for (;;) {
@@ -204,6 +204,11 @@ final class SoundPlayer implements Runnable {
                         clearActiveLocked();
                         break;
                     }
+                    if (needsPhysicalTransitionLocked(System.currentTimeMillis())) {
+                        transitionOwner = activeListener;
+                        transitionToken = activeToken;
+                        break;
+                    }
 
                     long waitMillis = millisUntilCompletionLocked(System.currentTimeMillis());
                     try {
@@ -216,6 +221,10 @@ final class SoundPlayer implements Runnable {
             if (completedOwner != null) {
                 stopPhysicalRetain();
                 completedOwner.onPlaybackCompleted(completedToken);
+                continue;
+            }
+            if (transitionOwner != null) {
+                processTransition(transitionOwner, transitionToken);
                 continue;
             }
             if (nextCommand == COMMAND_PLAY) {
@@ -275,14 +284,6 @@ final class SoundPlayer implements Runnable {
 
         try {
             if (!startPhysical(listener, token)) return;
-            // S60 的 create/realize 可能很慢，需要等 MMAPI 真正啟動後，再重設時間。
-            synchronized (this) {
-                if (activeListener == listener && activeToken == token) {
-                    timelineBaseMillis = start;
-                    timelineWallMillis = System.currentTimeMillis();
-                    notifyAll();
-                }
-            }
             if (isActiveOwner(listener, token)) listener.onPlaybackStarted(token);
         } catch (Throwable failure) {
             clearActiveIfOwned(listener, token);
@@ -304,6 +305,16 @@ final class SoundPlayer implements Runnable {
             }
         }
         if (stopped) stopPhysicalRetain();
+    }
+
+    private void processTransition(Listener owner, int token) {
+        try {
+            if (!startPhysical(owner, token)) return;
+        } catch (Throwable failure) {
+            clearActiveIfOwned(owner, token);
+            closePhysical();
+            owner.onPlaybackError(token, "port " + port + ": " + failure.toString());
+        }
     }
 
     private void processControls(Listener owner, int token, int volume,
@@ -366,17 +377,22 @@ final class SoundPlayer implements Runnable {
         }
         if (volume <= 0) return false;
 
-        int duration = sound.getDurationMillis();
-        int mediaPosition = timeline > Integer.MAX_VALUE ? Integer.MAX_VALUE : (int)timeline;
+        SoundData.Position position = sound.positionAt(timeline);
+        int segment = position.segmentIndex;
+        int mediaPosition = position.segmentMillis;
         int remainingLoops = loops;
-        if (duration > 0) {
+        int duration = sound.getDurationMillis();
+        if (sound.playerCanLoopSegment(segment)) {
+            remainingLoops = -1;
+        } else if (!sound.hasNativeLoop() && sound.getSegmentCount() == 1 && duration > 0) {
             long completedLoops = timeline / duration;
             if (loops >= 0) {
                 long remain = (long)loops - completedLoops;
                 if (remain <= 0) return false;
                 remainingLoops = remain > Integer.MAX_VALUE ? Integer.MAX_VALUE : (int)remain;
             }
-            mediaPosition = (int)(timeline % duration);
+        } else {
+            remainingLoops = 1;
         }
 
         Player current;
@@ -386,15 +402,16 @@ final class SoundPlayer implements Runnable {
             currentSound = loadedSound;
         }
 
-        if (current == null || !sameResource(currentSound, sound)) {
+        if (current == null || !sameResource(currentSound, sound) || loadedSegment != segment) {
             closePhysical();
-            InputStream newInput = Resources.open(sound.getResourcePath());
+            String segmentPath = sound.getSegmentPath(segment);
+            InputStream newInput = Resources.open(segmentPath);
             if (newInput == null) {
-                throw new IllegalStateException("Missing sound resource: " + sound.getResourcePath());
+                throw new IllegalStateException("Missing sound resource: " + segmentPath);
             }
             Player newPlayer = null;
             try {
-                newPlayer = Manager.createPlayer(newInput, sound.getContentType());
+                newPlayer = Manager.createPlayer(newInput, sound.getContentType(segment));
                 newPlayer.realize();
                 boolean rejected;
                 synchronized (this) {
@@ -403,6 +420,7 @@ final class SoundPlayer implements Runnable {
                         player = newPlayer;
                         input = newInput;
                         loadedSound = sound;
+                        loadedSegment = segment;
                         current = newPlayer;
                     }
                 }
@@ -431,6 +449,15 @@ final class SoundPlayer implements Runnable {
         // 部分後端直到調用 start() 時才會真正取得音訊裝置，
         // 因此於啟動後再次套用音量、速率與音高，確保延遲建立裝置的實作能套用正確設定。
         applyControls(current, volume, rate, pitch);
+        // create/realize 在真機上可能很慢；初始化期間暫停邏輯時鐘，
+        // 避免切段後的 Player 一啟動就落後並跳過 loop 開頭。
+        synchronized (this) {
+            if (activeListener == owner && activeToken == token && player == current) {
+                timelineBaseMillis = timeline;
+                timelineWallMillis = System.currentTimeMillis();
+                notifyAll();
+            }
+        }
         return true;
     }
 
@@ -472,6 +499,7 @@ final class SoundPlayer implements Runnable {
             player = null;
             input = null;
             loadedSound = null;
+            loadedSegment = -1;
         }
         closeDetached(oldPlayer, oldInput);
     }
@@ -486,7 +514,8 @@ final class SoundPlayer implements Runnable {
     }
 
     private boolean isLogicalCompleteLocked(long now) {
-        if (activeListener == null || activeSound == null || activeLoops < 0) return false;
+        if (activeListener == null || activeSound == null || activeLoops < 0
+                || activeSound.hasNativeLoop()) return false;
         int duration = activeSound.getDurationMillis();
         if (duration <= 0) return false;
         long end = (long)duration * activeLoops;
@@ -495,14 +524,33 @@ final class SoundPlayer implements Runnable {
 
     /** 回傳 -1 代表無需設定計時器（例如：空閒、無限循環或聲音長度未知）。 */
     private long millisUntilCompletionLocked(long now) {
-        if (activeListener == null || activeSound == null || activeLoops < 0) return -1;
-        int duration = activeSound.getDurationMillis();
-        if (duration <= 0) return -1;
-        long remainingMedia = (long)duration * activeLoops - currentTimelineLocked(now);
-        if (remainingMedia <= 0) return 0;
+        if (activeListener == null || activeSound == null) return -1;
+        long timeline = currentTimelineLocked(now);
+        long remainingMedia = -1L;
+        if (activeLoops >= 0 && !activeSound.hasNativeLoop()) {
+            int duration = activeSound.getDurationMillis();
+            if (duration > 0) remainingMedia = (long)duration * activeLoops - timeline;
+        }
+        if (activeVolume > 0 && player != null) {
+            long segmentRemaining = activeSound.millisUntilSegmentBoundary(timeline);
+            if (segmentRemaining >= 0L
+                    && (remainingMedia < 0L || segmentRemaining < remainingMedia)) {
+                remainingMedia = segmentRemaining;
+            }
+        }
+        if (remainingMedia < 0L) return -1;
+        if (remainingMedia == 0L) return 0;
         int rate = normalizeRate(activeRatePercent);
         long remainingWall = (remainingMedia * 100L + rate - 1L) / rate;
         return remainingWall > Integer.MAX_VALUE ? Integer.MAX_VALUE : remainingWall;
+    }
+
+    private boolean needsPhysicalTransitionLocked(long now) {
+        if (activeListener == null || activeSound == null || activeVolume <= 0 || player == null) {
+            return false;
+        }
+        SoundData.Position position = activeSound.positionAt(currentTimelineLocked(now));
+        return !sameResource(loadedSound, activeSound) || loadedSegment != position.segmentIndex;
     }
 
     private long currentTimelineLocked(long now) {

@@ -380,8 +380,9 @@ public final class Scratchpad {
             throw new IOException("sound stem must not have an extension: " + stem);
         }
         SoundConverter.Result converted = SoundConverter.convert(mld.bytes(), new File(assetsDir, safeStem), forceWav);
-        String resource = "/assets/" + safeStem + converted.extension;
-        soundEntries.add(new SoundIndex.Entry(resource, converted.durationMillis));
+        String resourceStem = "/assets/" + safeStem;
+        String resource = resourceStem + converted.primarySuffix();
+        soundEntries.add(converted.indexEntry(resourceStem));
         return ("SND:" + resource + "\n").getBytes("ISO-8859-1");
     }
 

@@ -14,12 +14,36 @@ import java.util.Map;
 final class SoundIndex {
     static final class Entry {
         final String resourcePath;
-        final int durationMillis;
+        final String[] segmentPaths;
+        final int[] segmentDurationsMillis;
+        final int loopSegmentIndex;
 
         Entry(String resourcePath, int durationMillis) {
+            this(resourcePath, new String[] {resourcePath}, new int[] {durationMillis}, -1);
+        }
+
+        Entry(String resourcePath, String[] segmentPaths, int[] segmentDurationsMillis,
+                int loopSegmentIndex) {
             if (resourcePath == null || resourcePath.length() == 0) throw new IllegalArgumentException("empty sound resource path");
+            if (segmentPaths == null || segmentDurationsMillis == null
+                    || segmentPaths.length == 0 || segmentPaths.length != segmentDurationsMillis.length
+                    || segmentPaths.length > 255) {
+                throw new IllegalArgumentException("invalid sound segments");
+            }
+            if (loopSegmentIndex < -1 || loopSegmentIndex >= segmentPaths.length) {
+                throw new IllegalArgumentException("invalid sound loop segment");
+            }
             this.resourcePath = resourcePath;
-            this.durationMillis = Math.max(1, durationMillis);
+            this.segmentPaths = new String[segmentPaths.length];
+            this.segmentDurationsMillis = new int[segmentDurationsMillis.length];
+            for (int i = 0; i < segmentPaths.length; i++) {
+                if (segmentPaths[i] == null || segmentPaths[i].length() == 0) {
+                    throw new IllegalArgumentException("empty sound segment path");
+                }
+                this.segmentPaths[i] = segmentPaths[i];
+                this.segmentDurationsMillis[i] = Math.max(1, segmentDurationsMillis[i]);
+            }
+            this.loopSegmentIndex = loopSegmentIndex;
         }
     }
 
@@ -39,12 +63,17 @@ final class SoundIndex {
         FileIO.ensureParent(file);
         DataOutputStream out = new DataOutputStream(new FileOutputStream(file));
         try {
-            out.writeBytes("SNDI");
+            out.writeBytes("SND2");
             out.writeShort(entries.size());
             for (int i = 0; i < entries.size(); i++) {
                 Entry entry = entries.get(i);
                 out.writeInt(hash(entry.resourcePath));
-                out.writeInt(entry.durationMillis);
+                out.writeByte(entry.segmentPaths.length);
+                out.writeByte(entry.loopSegmentIndex + 1);
+                for (int segment = 0; segment < entry.segmentPaths.length; segment++) {
+                    out.writeUTF(entry.segmentPaths[segment]);
+                    out.writeInt(entry.segmentDurationsMillis[segment]);
+                }
             }
         } finally {
             out.close();
