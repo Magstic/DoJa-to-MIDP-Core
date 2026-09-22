@@ -41,6 +41,7 @@ public class Graphics {
     protected int srcRatio = 255;
     protected int dstRatio = 255;
     private boolean nativeRenderFastPath = true;
+    private boolean sourceOverAlphaPath;
     private int lockCount;
     private boolean presenting;
     private int[] fillScratch;
@@ -61,11 +62,9 @@ public class Graphics {
     private int ratioLutSource = -1;
     private int ratioLutDestination = -1;
     /*
-    * DoJa 5.x 支援全圖 256 階半透明，但 MIDP 只支援「完全透明/不透明」。
-    * 如果直接把 setAlpha() 給 MIDP 的 drawRGB() 處理，在嚴格的實作上圖片會直接消失。
-    * 
-    * 現在改用軟體混合模式。這兩個 LUT 會先算好當前透明度的顏色比重，供每格畫面重複使用。
-    * 這能在核心的繪圖迴圈中，幫每個不透明像素省下 3 次昂貴的乘法運算！
+    * DoJa 5.x 支援全圖 256 階半透明。非 Source-over 的 raster mode
+    * 仍需讀回 framebuffer，這兩個 LUT 會先算好當前透明度的顏色比重，
+    * 供每格畫面重複使用；互補 OP_ADD 則在 source-only 路徑中交給 MIDP drawRGB。
     */
     private int[] imageAlphaSourceLut;
     private int[] imageAlphaDestinationLut;
@@ -355,6 +354,91 @@ public class Graphics {
         drawSubImage(img, dx, dy, sx, sy, sw, sh, dw, dh);
     }
 
+    /** Draw a mutual OP_ADD image without changing the caller's raster state. */
+    protected final void drawSourceOverImage(Image image, int alpha,
+            int dx, int dy, int sx, int sy, int width, int height) {
+        if (image == null) return;
+        int savedAlpha = image.getAlpha();
+        boolean savedPath = sourceOverAlphaPath;
+        try {
+            sourceOverAlphaPath = true;
+            image.setAlpha(alpha);
+            drawUnscaledSubImage(image, dx, dy, sx, sy, width, height);
+        } finally {
+            sourceOverAlphaPath = savedPath;
+            image.setAlpha(savedAlpha);
+        }
+    }
+
+    /** Draw a mutual OP_ADD scaled image without reading the destination. */
+    protected final void drawSourceOverImage(Image image, int alpha,
+            int dx, int dy, int dw, int dh, int sx, int sy, int sw, int sh) {
+        if (image == null) return;
+        int savedAlpha = image.getAlpha();
+        boolean savedPath = sourceOverAlphaPath;
+        try {
+            sourceOverAlphaPath = true;
+            image.setAlpha(alpha);
+            drawSubImage(image, dx, dy, sx, sy, sw, sh, dw, dh);
+        } finally {
+            sourceOverAlphaPath = savedPath;
+            image.setAlpha(savedAlpha);
+        }
+    }
+
+    /** Fill a mutual OP_ADD rectangle with a reusable ARGB scratch buffer. */
+    protected final void drawSourceOverRect(int x, int y, int width, int height,
+            int rgb, int alpha) {
+        ensureSurface();
+        if (width <= 0 || height <= 0 || alpha <= 0) return;
+
+        int clipX = midpGraphics.getClipX();
+        int clipY = midpGraphics.getClipY();
+        int clipR = clipX + midpGraphics.getClipWidth();
+        int clipB = clipY + midpGraphics.getClipHeight();
+        int left = x > clipX ? x : clipX;
+        int top = y > clipY ? y : clipY;
+        int right = x + width < clipR ? x + width : clipR;
+        int bottom = y + height < clipB ? y + height : clipB;
+        int logicalLeft = -originX;
+        int logicalTop = -originY;
+        int logicalRight = screenWidth - originX;
+        int logicalBottom = screenHeight - originY;
+        if (left < logicalLeft) left = logicalLeft;
+        if (top < logicalTop) top = logicalTop;
+        if (right > logicalRight) right = logicalRight;
+        if (bottom > logicalBottom) bottom = logicalBottom;
+        if (left >= right || top >= bottom) return;
+
+        int blockWidth = right - left;
+        if (blockWidth > COMPOSITE_PIXELS) blockWidth = COMPOSITE_PIXELS;
+        int rowsPerBlock = COMPOSITE_PIXELS / blockWidth;
+        if (rowsPerBlock < 1) rowsPerBlock = 1;
+        ensureScratch(blockWidth * rowsPerBlock);
+        boolean dither = alpha < 255 && Image.shouldDitherAlpha();
+        int opaquePixel = 0xFF000000 | (rgb & 0x00FFFFFF);
+        int alphaPixel = (alpha << 24) | (rgb & 0x00FFFFFF);
+
+        for (int by = top; by < bottom; by += rowsPerBlock) {
+            int bh = bottom - by;
+            if (bh > rowsPerBlock) bh = rowsPerBlock;
+            for (int bx = left; bx < right; bx += blockWidth) {
+                int bw = right - bx;
+                if (bw > blockWidth) bw = blockWidth;
+                for (int row = 0; row < bh; row++) {
+                    int localY = by + row - y;
+                    int rowOffset = row * bw;
+                    for (int col = 0; col < bw; col++) {
+                        fillScratch[rowOffset + col] = dither
+                                ? Image.ditherAlphaPixel(alphaPixel, bx + col - x, localY)
+                                : (alpha == 255 ? opaquePixel : alphaPixel);
+                    }
+                }
+                midpGraphics.drawRGB(fillScratch, 0, bw, bx, by, bw, bh, true);
+            }
+        }
+    }
+
     /**
      * 處理無縮放的子圖繪製（DoJa 語義）
      * DoJa 的 drawImage() 採用 1:1 像素映射。當指定的來源矩形超出圖片實際邊界時，
@@ -428,7 +512,6 @@ public class Graphics {
         if (img == null) return;
         if (sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0) return;
         int imageAlpha = img.getAlpha();
-        if (imageAlpha <= 0) return;
         int imgW = img.getWidth();
         int imgH = img.getHeight();
         if (sx < 0) { sw += sx; sx = 0; }
@@ -440,19 +523,25 @@ public class Graphics {
         javax.microedition.lcdui.Image src = img.getMIDPImage();
         if (src == null) return;
 
+        boolean sourceOver = sourceOverAlphaPath;
+        boolean alphaCacheAllowed = true;
+        if (sourceOver) {
+            alphaCacheAllowed = img.useSourceOverAlphaCache(src, imageAlpha,
+                    (long)src.getWidth() * (long)src.getHeight() <= COMPOSITE_PIXELS);
+        }
+        if (imageAlpha <= 0) return;
+
         /*
-        * 一般 DoJa 繪圖 **必須** 直接走 MIDP 的原生繪製！
-        * 筆記：禁止為了模擬 Image.setAlpha()，就把畫面 (framebuffer) 讀出來改完，再用 drawRGB 貼回去。
-        * 即便是 N86 或 K800i 這種頂尖裝置，在這種像素級 API 的實作上也極慢！
-        * 
-        * 這裡使用在第一次用到時，才延遲快取 (Lazy Cache) 一份『預先處理好透明度的不可變圖片副本』。
-        * - 只支援開/關透明的手機：這份副本會使用『棋盤格抖動』來模擬半透明效果（靈感來自《吸血鬼的黎明》）。
-        * - 支援真實半透明的手機：副本則直接保存精確的 ARGB 半透明顏色值。
+        * 可化約成 Source-over 的路徑優先使用 MIDP 原生繪製：小型穩定透明度
+        * 圖片使用 Image 的單一 lazy cache，動態透明度則使用下方固定大小的
+        * source-only scratch path。其他 raster mode 仍保留 framebuffer 軟體合成。
+        * - 只支援開/關透明的手機：cache 與 scratch 都使用同一套 Bayer 抖動。
+        * - 支援真實半透明的手機：直接交給 MIDP drawImage/drawRGB 處理 ARGB。
         */
-        if (nativeRenderFastPath && sw == dw && sh == dh) {
+        if ((nativeRenderFastPath || sourceOver) && sw == dw && sh == dh) {
             javax.microedition.lcdui.Image nativeSrc = src;
             if (imageAlpha < 255) {
-                nativeSrc = img.getMIDPAlphaRenderImage(src);
+                nativeSrc = alphaCacheAllowed ? img.getMIDPAlphaRenderImage(src) : null;
             }
             if (nativeSrc != null) {
                 if (flipMode == FLIP_NONE) {
@@ -476,6 +565,11 @@ public class Graphics {
         }
 
         /* 可變動 (Mutable) 或經過縮放 (Scaled) 的圖片，不能直接使用之前快取的『不可變圖片副本』！ */
+        if (sourceOver && imageAlpha < 255) {
+            drawNativeStreaming(src, img, dx, dy, sx, sy, sw, sh, dw, dh);
+            return;
+        }
+
         if (nativeRenderFastPath && imageAlpha < 255 && sw == dw && sh == dh
                 && flipMode == FLIP_NONE) {
             drawUnscaledAlphaImage(src, img, dx, dy, sx, sy, sw, sh, imageAlpha);
@@ -494,7 +588,10 @@ public class Graphics {
         int imageAlpha = image.getAlpha();
         boolean colourKey = image.isTransparentEnabled();
         int transparent = image.getTransparentColor() & 0x00ffffff;
-        if (sw != dw || sh != dh) prepareScaleMaps(dw, dh, sw, sh);
+        boolean dither = sourceOverAlphaPath && imageAlpha < 255 && Image.shouldDitherAlpha();
+        if (sw != dw || sh != dh || outW > COMPOSITE_PIXELS) {
+            prepareScaleMaps(dw, dh, sw, sh);
+        }
 
         /* 
          * drawImage() 是系統常見的效能熱點，因此改為一次搬移一整條切片，同時將暫存緩衝區控制在 4096 像素內。
@@ -513,8 +610,8 @@ public class Graphics {
             return;
         }
 
-        /* 大型縮放塞不進固定工作區時改成逐列串流，使用慢速減少 JVM RAM 開銷。*/
-        ensureScratch(outW);
+        /* 大型縮放塞不進固定工作區時改成逐列串流，使用固定寬度 tile。 */
+        ensureScratch(COMPOSITE_PIXELS);
         ensurePixelScratch(sw > sh ? sw : sh);
         for (int outY = 0; outY < outH; outY++) {
             if (!rotated) {
@@ -522,11 +619,21 @@ public class Graphics {
                     ? dh - 1 - outY : outY;
                 int sourceY = sy + scaleMapY[preY];
                 src.getRGB(pixelScratch, 0, sw, sx, sourceY, sw, 1);
-                for (int outX = 0; outX < outW; outX++) {
-                    int preX = (flipMode == FLIP_HORIZONTAL || flipMode == FLIP_ROTATE)
-                        ? dw - 1 - outX : outX;
-                    int pixel = pixelScratch[scaleMapX[preX]];
-                    fillScratch[outX] = applyImageAlpha(pixel, imageAlpha, colourKey, transparent);
+                for (int outX = 0; outX < outW; outX += COMPOSITE_PIXELS) {
+                    int bw = outW - outX;
+                    if (bw > COMPOSITE_PIXELS) bw = COMPOSITE_PIXELS;
+                    for (int col = 0; col < bw; col++) {
+                        int drawX = outX + col;
+                        int preX = (flipMode == FLIP_HORIZONTAL || flipMode == FLIP_ROTATE)
+                            ? dw - 1 - drawX : drawX;
+                        int sourceIndex = scaleMapX[preX];
+                        int sourceX = sx + sourceIndex;
+                        int pixel = pixelScratch[sourceIndex];
+                        fillScratch[col] = prepareImagePixel(pixel, imageAlpha, colourKey,
+                                transparent, dither, sourceX, sourceY);
+                    }
+                    drawPreparedImagePixels(fillScratch, 0, bw, dx + outX, dy + outY, bw, 1,
+                            nativeRenderFastPath && imageAlpha < 255);
                 }
             } else {
                 int preX;
@@ -539,21 +646,28 @@ public class Graphics {
                 }
                 int sourceX = sx + scaleMapX[preX];
                 src.getRGB(pixelScratch, 0, 1, sourceX, sy, 1, sh);
-                for (int outX = 0; outX < outW; outX++) {
-                    int preY;
-                    switch (flipMode) {
-                        case FLIP_ROTATE_RIGHT:
-                        case FLIP_ROTATE_RIGHT_VERTICAL:
-                            preY = dh - 1 - outX; break;
-                        default:
-                            preY = outX; break;
+                for (int outX = 0; outX < outW; outX += COMPOSITE_PIXELS) {
+                    int bw = outW - outX;
+                    if (bw > COMPOSITE_PIXELS) bw = COMPOSITE_PIXELS;
+                    for (int col = 0; col < bw; col++) {
+                        int drawX = outX + col;
+                        int preY;
+                        switch (flipMode) {
+                            case FLIP_ROTATE_RIGHT:
+                            case FLIP_ROTATE_RIGHT_VERTICAL:
+                                preY = dh - 1 - drawX; break;
+                            default:
+                                preY = drawX; break;
+                        }
+                        int sourceY = sy + scaleMapY[preY];
+                        int pixel = pixelScratch[scaleMapY[preY]];
+                        fillScratch[col] = prepareImagePixel(pixel, imageAlpha, colourKey,
+                                transparent, dither, sourceX, sourceY);
                     }
-                    int pixel = pixelScratch[scaleMapY[preY]];
-                    fillScratch[outX] = applyImageAlpha(pixel, imageAlpha, colourKey, transparent);
+                    drawPreparedImagePixels(fillScratch, 0, bw, dx + outX, dy + outY, bw, 1,
+                            nativeRenderFastPath && imageAlpha < 255);
                 }
             }
-            drawPreparedImagePixels(fillScratch, 0, outW, dx, dy + outY, outW, 1,
-                    nativeRenderFastPath && imageAlpha < 255);
         }
     }
 
@@ -562,6 +676,7 @@ public class Graphics {
             int imageAlpha, boolean colourKey, int transparent, boolean rotated) {
         int outW = rotated ? sh : sw;
         int outH = rotated ? sw : sh;
+        boolean dither = sourceOverAlphaPath && imageAlpha < 255 && Image.shouldDitherAlpha();
         int rowsPerBlock = COMPOSITE_PIXELS / outW;
         if (rowsPerBlock < 1) rowsPerBlock = 1;
 
@@ -575,16 +690,18 @@ public class Graphics {
             if (!rotated) {
                 boolean reverseY = flipMode == FLIP_VERTICAL || flipMode == FLIP_ROTATE;
                 boolean reverseX = flipMode == FLIP_HORIZONTAL || flipMode == FLIP_ROTATE;
-                int sourceY = reverseY ? sy + sh - outY - bh : sy + outY;
-                src.getRGB(pixelScratch, 0, sw, sx, sourceY, sw, bh);
+                int readY = reverseY ? sy + sh - outY - bh : sy + outY;
+                src.getRGB(pixelScratch, 0, sw, sx, readY, sw, bh);
                 for (int ry = 0; ry < bh; ry++) {
                     int sourceRow = (reverseY ? bh - 1 - ry : ry) * sw;
                     int outRow = ry * outW;
+                    int sourceY = reverseY ? sy + sh - 1 - (outY + ry) : sy + outY + ry;
                     for (int ox = 0; ox < outW; ox++) {
                         int sourceX = reverseX ? sw - 1 - ox : ox;
                         int pixel = pixelScratch[sourceRow + sourceX];
-                        fillScratch[outRow + ox] = applyImageAlpha(
-                                pixel, imageAlpha, colourKey, transparent);
+                        fillScratch[outRow + ox] = prepareImagePixel(
+                                pixel, imageAlpha, colourKey, transparent, dither,
+                                sx + sourceX, sourceY);
                     }
                 }
             } else {
@@ -592,16 +709,18 @@ public class Graphics {
                         || flipMode == FLIP_ROTATE_RIGHT_VERTICAL;
                 boolean reverseSourceY = flipMode == FLIP_ROTATE_RIGHT
                         || flipMode == FLIP_ROTATE_RIGHT_VERTICAL;
-                int sourceX = reverseSourceX ? sx + sw - outY - bh : sx + outY;
-                src.getRGB(pixelScratch, 0, bh, sourceX, sy, bh, sh);
+                int readX = reverseSourceX ? sx + sw - outY - bh : sx + outY;
+                src.getRGB(pixelScratch, 0, bh, readX, sy, bh, sh);
                 for (int ry = 0; ry < bh; ry++) {
                     int sourceColumn = reverseSourceX ? bh - 1 - ry : ry;
                     int outRow = ry * outW;
+                    int sourceX = reverseSourceX ? sx + sw - 1 - (outY + ry) : sx + outY + ry;
                     for (int ox = 0; ox < outW; ox++) {
                         int sourceY = reverseSourceY ? sh - 1 - ox : ox;
                         int pixel = pixelScratch[sourceY * bh + sourceColumn];
-                        fillScratch[outRow + ox] = applyImageAlpha(
-                                pixel, imageAlpha, colourKey, transparent);
+                        fillScratch[outRow + ox] = prepareImagePixel(
+                                pixel, imageAlpha, colourKey, transparent, dither,
+                                sourceX, sy + sourceY);
                     }
                 }
             }
@@ -616,6 +735,7 @@ public class Graphics {
         int sourceCount = sw * sh;
         ensurePixelScratch(sourceCount);
         src.getRGB(pixelScratch, 0, sw, sx, sy, sw, sh);
+        boolean dither = sourceOverAlphaPath && imageAlpha < 255 && Image.shouldDitherAlpha();
 
         int outW = rotated ? dh : dw;
         int outH = rotated ? dw : dh;
@@ -639,8 +759,9 @@ public class Graphics {
                                 ? dw - 1 - ox : ox;
                         int sourceX = scaleMapX[preX];
                         int pixel = pixelScratch[sourceY * sw + sourceX];
-                        fillScratch[outRow + ox] = applyImageAlpha(
-                                pixel, imageAlpha, colourKey, transparent);
+                        fillScratch[outRow + ox] = prepareImagePixel(
+                                pixel, imageAlpha, colourKey, transparent, dither,
+                                sx + sourceX, sy + sourceY);
                     }
                 } else {
                     int preX;
@@ -663,8 +784,9 @@ public class Graphics {
                         }
                         int sourceY = scaleMapY[preY];
                         int pixel = pixelScratch[sourceY * sw + sourceX];
-                        fillScratch[outRow + ox] = applyImageAlpha(
-                                pixel, imageAlpha, colourKey, transparent);
+                        fillScratch[outRow + ox] = prepareImagePixel(
+                                pixel, imageAlpha, colourKey, transparent, dither,
+                                sx + sourceX, sy + sourceY);
                     }
                 }
             }
@@ -674,9 +796,8 @@ public class Graphics {
     }
 
     /**
-     * 為『1:1 原尺寸、無翻轉』的一般圖片使用的 DoJa-5 高速半透明合成器。
-     * 第一次執行完成後，就不會再建立任何新物件（Zero Allocation，完全不給 GC 壓力）。
-     * 來源與目標畫面會拆分成有邊界的「小區塊 (Tiles)」分段處理，即使處理大圖，RAM 也能保持恆定。
+     * 一般繪圖的 framebuffer 半透明合成器。互補 OP_ADD 不會進入此方法；
+     * 它使用 drawNativeStreaming 的 source-only 路徑。
      */
     private void drawUnscaledAlphaImage(javax.microedition.lcdui.Image src, Image image,
             int dx, int dy, int sx, int sy, int width, int height, int imageAlpha) {
@@ -728,12 +849,15 @@ public class Graphics {
     }
 
     /**
-     * 對已準備好的 ARGB 像素做顏色疊加（軟體渲染）。
-     * 該方法 **僅** 在圖片有做旋轉/縮放、同時 **又** 設定了半透明 (Image.setAlpha) 時才會觸發；
-     * 一般普通、不透明的精靈，依然會走原生的 drawImage/drawRegion 繪圖通道，以確保最佳效能。
+     * 對已準備好的 ARGB 像素繪製。互補 OP_ADD 直接使用 MIDP 的
+     * Source-over drawRGB；其他需要目的像素的模式才進入軟體合成。
      */
     private void drawPreparedImagePixels(int[] rgb, int offset, int scanlength,
             int x, int y, int width, int height, boolean forceSoftwareAlpha) {
+        if (sourceOverAlphaPath) {
+            midpGraphics.drawRGB(rgb, offset, scanlength, x, y, width, height, true);
+            return;
+        }
         if (!forceSoftwareAlpha) {
             drawRGBComposite(rgb, offset, scanlength, x, y, width, height, true);
             return;
@@ -881,6 +1005,12 @@ public class Graphics {
         if (colourKey && rgb == transparent) alpha = 0;
         if (imageAlpha < 255) alpha = div255Round(multiplyU8(alpha, imageAlpha));
         return rgb | (alpha << 24);
+    }
+
+    private static int prepareImagePixel(int pixel, int imageAlpha,
+            boolean colourKey, int transparent, boolean dither, int sourceX, int sourceY) {
+        int prepared = applyImageAlpha(pixel, imageAlpha, colourKey, transparent);
+        return dither ? Image.ditherAlphaPixel(prepared, sourceX, sourceY) : prepared;
     }
 
     private void ensurePixelScratch(int size) {
@@ -1757,6 +1887,7 @@ public class Graphics {
     public void dispose() {
         backBuffer = null;
         midpGraphics = null;
+        sourceOverAlphaPath = false;
         fillScratch = null;
         pixelScratch = null;
         blendScratch = null;

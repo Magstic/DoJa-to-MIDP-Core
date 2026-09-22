@@ -34,8 +34,9 @@ SoundPlayer            聲音播放狀態與 MMAPI 控制
 ### 繪圖
 
 1. 一般繪製直接調用 MIDP 原生繪圖 API；
-2. ADD、SUB 等需要 **目標像素參與運算** 的操作，切換至軟體光柵處理；
-3. 熱路徑採用矩形批次回讀（Batch Readback）、單色查找表（Solid-color LUT）以及整數運算（Not Float）。
+2. 互補比例的 ADD 化約為 Source-over，直接使用 MIDP `drawRGB(..., true)`；
+3. 其他 ADD、SUB 等需要 **目標像素參與運算** 的操作，切換至軟體光柵處理；
+4. 軟體路徑採用矩形批次回讀（Batch Readback）、單色查找表（Solid-color LUT）以及整數運算（Not Float）。
 
 
 ### 畫面提交

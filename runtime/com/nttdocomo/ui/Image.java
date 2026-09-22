@@ -27,6 +27,9 @@ public class Image {
     private javax.microedition.lcdui.Image alphaRenderSource;
     private int alphaRenderValue = -1;
     private boolean alphaRenderDithered;
+    private javax.microedition.lcdui.Image alphaRenderHistorySource;
+    private int alphaRenderHistoryValue = -1;
+    private boolean alphaRenderAlphaChanged;
 
     private static final int[] BAYER_8X8 = {
          0, 48, 12, 60,  3, 51, 15, 63,
@@ -111,8 +114,7 @@ public class Image {
     /**
      * 回傳一張已套用好 DoJa 半透明效果的 MIDP 圖。
      * - 唯讀圖片 (Immutable)：快取算好的半透明副本，以便重複使用。
-     * - 可變圖片 (Mutable)：直接置 NULL；
-     * 遇到可變圖片時，Graphics 會改用軟體渲染來接手繪製。
+     * - 可變圖片 (Mutable)：直接置 NULL，由 Graphics 的來源 scratch path 接手。
      */
     javax.microedition.lcdui.Image getMIDPAlphaRenderImage(javax.microedition.lcdui.Image source) {
         int value = alpha;
@@ -126,7 +128,7 @@ public class Image {
         }
         if (source.isMutable()) return null;
 
-        boolean dither = Display.__midpNumAlphaLevels() <= 2;
+        boolean dither = shouldDitherAlpha();
 
         int w = source.getWidth();
         int h = source.getHeight();
@@ -140,7 +142,6 @@ public class Image {
             * 因此，這裡改用『棋盤格』。雖然是偽的，但能模擬出 65 階濃淡的半透明視覺效果。
             */
             for (int y = 0, i = 0; y < h; y++) {
-                int patternRow = (y & 7) << 3;
                 for (int x = 0; x < w; x++, i++) {
                     int pixel = pixels[i];
                     int sourceAlpha = (pixel >>> 24) & 255;
@@ -149,9 +150,7 @@ public class Image {
                         continue;
                     }
                     int effective = (sourceAlpha * value + 127) / 255;
-                    int coverage = (effective * 64 + 127) / 255;
-                    if (BAYER_8X8[patternRow + (x & 7)] >= coverage) pixels[i] = 0;
-                    else pixels[i] = 0xFF000000 | (pixel & 0x00FFFFFF);
+                    pixels[i] = ditherAlphaPixel((effective << 24) | (pixel & 0x00FFFFFF), x, y);
                 }
             }
         } else {
@@ -172,11 +171,45 @@ public class Image {
         return rendered;
     }
 
+    /**
+     * Source-over 的圖片路徑只快取第一次看到的透明度。只要同一來源的
+     * 有效透明度改變，就改用 Graphics 的固定 scratch buffer，避免再建立
+     * 一張新的原生圖片。
+     */
+    boolean useSourceOverAlphaCache(javax.microedition.lcdui.Image source,
+            int value, boolean areaFitsScratch) {
+        if (source != alphaRenderHistorySource) {
+            alphaRenderHistorySource = source;
+            alphaRenderHistoryValue = value;
+            alphaRenderAlphaChanged = false;
+        } else if (alphaRenderHistoryValue != value) {
+            alphaRenderHistoryValue = value;
+            alphaRenderAlphaChanged = true;
+        }
+        return areaFitsScratch && !alphaRenderAlphaChanged;
+    }
+
+    static boolean shouldDitherAlpha() {
+        return Display.__midpNumAlphaLevels() <= 2;
+    }
+
+    static int ditherAlphaPixel(int pixel, int x, int y) {
+        int alpha = (pixel >>> 24) & 0xFF;
+        if (alpha == 0) return 0;
+        if (alpha == 255) return 0xFF000000 | (pixel & 0x00FFFFFF);
+        int coverage = (alpha * 64 + 127) / 255;
+        return BAYER_8X8[((y & 7) << 3) | (x & 7)] >= coverage
+                ? 0 : 0xFF000000 | (pixel & 0x00FFFFFF);
+    }
+
     private void invalidateAlphaRenderImage() {
         alphaRenderImage = null;
         alphaRenderSource = null;
         alphaRenderValue = -1;
         alphaRenderDithered = false;
+        alphaRenderHistorySource = null;
+        alphaRenderHistoryValue = -1;
+        alphaRenderAlphaChanged = false;
     }
 
     public int getWidth() {
