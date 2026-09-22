@@ -26,7 +26,6 @@ public class Image {
     private javax.microedition.lcdui.Image alphaRenderImage;
     private javax.microedition.lcdui.Image alphaRenderSource;
     private int alphaRenderValue = -1;
-    private boolean alphaRenderDithered;
     private javax.microedition.lcdui.Image alphaRenderHistorySource;
     private int alphaRenderHistoryValue = -1;
     private boolean alphaRenderAlphaChanged;
@@ -166,15 +165,13 @@ public class Image {
                 javax.microedition.lcdui.Image.createRGBImage(pixels, w, h, true);
         alphaRenderSource = source;
         alphaRenderValue = value;
-        alphaRenderDithered = dither;
         alphaRenderImage = rendered;
         return rendered;
     }
 
     /**
-     * Source-over 的圖片路徑只快取第一次看到的透明度。只要同一來源的
-     * 有效透明度改變，就改用 Graphics 的固定 scratch buffer，避免再建立
-     * 一張新的原生圖片。
+     * Source-over 圖片路徑只快取穩定使用的透明度；同一來源的有效透明度
+     * 改變後，改用 Graphics 的固定暫存區，避免再建立原生圖片。
      */
     boolean useSourceOverAlphaCache(javax.microedition.lcdui.Image source,
             int value, boolean areaFitsScratch) {
@@ -206,7 +203,6 @@ public class Image {
         alphaRenderImage = null;
         alphaRenderSource = null;
         alphaRenderValue = -1;
-        alphaRenderDithered = false;
         alphaRenderHistorySource = null;
         alphaRenderHistoryValue = -1;
         alphaRenderAlphaChanged = false;

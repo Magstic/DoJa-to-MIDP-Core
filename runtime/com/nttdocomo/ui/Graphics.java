@@ -354,7 +354,7 @@ public class Graphics {
         drawSubImage(img, dx, dy, sx, sy, sw, sh, dw, dh);
     }
 
-    /** Draw a mutual OP_ADD image without changing the caller's raster state. */
+    /** 繪製互補 OP_ADD 圖片，且不改變呼叫端的光柵狀態。 */
     protected final void drawSourceOverImage(Image image, int alpha,
             int dx, int dy, int sx, int sy, int width, int height) {
         if (image == null) return;
@@ -370,7 +370,7 @@ public class Graphics {
         }
     }
 
-    /** Draw a mutual OP_ADD scaled image without reading the destination. */
+    /** 繪製互補 OP_ADD 縮放圖片，不讀回目的畫面。 */
     protected final void drawSourceOverImage(Image image, int alpha,
             int dx, int dy, int dw, int dh, int sx, int sy, int sw, int sh) {
         if (image == null) return;
@@ -386,7 +386,7 @@ public class Graphics {
         }
     }
 
-    /** Fill a mutual OP_ADD rectangle with a reusable ARGB scratch buffer. */
+    /** 使用可重用的 ARGB 暫存區填滿互補 OP_ADD 矩形。 */
     protected final void drawSourceOverRect(int x, int y, int width, int height,
             int rgb, int alpha) {
         ensureSurface();
@@ -512,6 +512,7 @@ public class Graphics {
         if (img == null) return;
         if (sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0) return;
         int imageAlpha = img.getAlpha();
+        if (imageAlpha <= 0) return;
         int imgW = img.getWidth();
         int imgH = img.getHeight();
         if (sx < 0) { sw += sx; sx = 0; }
@@ -529,8 +530,6 @@ public class Graphics {
             alphaCacheAllowed = img.useSourceOverAlphaCache(src, imageAlpha,
                     (long)src.getWidth() * (long)src.getHeight() <= COMPOSITE_PIXELS);
         }
-        if (imageAlpha <= 0) return;
-
         /*
         * 可化約成 Source-over 的路徑優先使用 MIDP 原生繪製：小型穩定透明度
         * 圖片使用 Image 的單一 lazy cache，動態透明度則使用下方固定大小的
