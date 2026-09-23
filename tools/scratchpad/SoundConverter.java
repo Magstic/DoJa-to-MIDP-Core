@@ -19,11 +19,11 @@ import mld.api.MldMidiPlayback;
 import mld.api.MldPcm16;
 
 /** 將 MLD payload 轉成 MIDP 較容易播放的 MIDI/WAV，並順手算好實際長度。 */
-final class SoundConverter {
-    static final class Result {
-        final String[] suffixes;
-        final int[] durationsMillis;
-        final int loopSegmentIndex;
+public final class SoundConverter {
+    public static final class Result {
+        public final String[] suffixes;
+        public final int[] durationsMillis;
+        public final int loopSegmentIndex;
 
         Result(String[] suffixes, int[] durationsMillis, int loopSegmentIndex) {
             this.suffixes = suffixes;
@@ -31,11 +31,11 @@ final class SoundConverter {
             this.loopSegmentIndex = loopSegmentIndex;
         }
 
-        String primarySuffix() {
+        public String primarySuffix() {
             return suffixes[0];
         }
 
-        SoundIndex.Entry indexEntry(String resourceStem) {
+        public SoundIndex.Entry indexEntry(String resourceStem) {
             String[] resources = new String[suffixes.length];
             for (int i = 0; i < resources.length; i++) resources[i] = resourceStem + suffixes[i];
             return new SoundIndex.Entry(resources[0], resources, durationsMillis, loopSegmentIndex);
@@ -44,7 +44,7 @@ final class SoundConverter {
 
     private SoundConverter() {}
 
-    static Result convert(byte[] bytes, File stem, boolean forceWav) throws Exception {
+    public static Result convert(byte[] bytes, File stem, boolean forceWav) throws Exception {
         MldConversion conversion = MldConverter.convert(bytes);
         boolean midi = conversion.hasMidi();
         boolean sampled = conversion.hasRenderableSampledAudio();

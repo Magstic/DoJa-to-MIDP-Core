@@ -11,18 +11,18 @@ import java.util.List;
 import java.util.Map;
 
 /** 記下轉檔後的聲音長度，Runtime 的 logical clock 不必依賴 MMAPI 回報。 */
-final class SoundIndex {
-    static final class Entry {
-        final String resourcePath;
-        final String[] segmentPaths;
-        final int[] segmentDurationsMillis;
-        final int loopSegmentIndex;
+public final class SoundIndex {
+    public static final class Entry {
+        public final String resourcePath;
+        public final String[] segmentPaths;
+        public final int[] segmentDurationsMillis;
+        public final int loopSegmentIndex;
 
-        Entry(String resourcePath, int durationMillis) {
+        public Entry(String resourcePath, int durationMillis) {
             this(resourcePath, new String[] {resourcePath}, new int[] {durationMillis}, -1);
         }
 
-        Entry(String resourcePath, String[] segmentPaths, int[] segmentDurationsMillis,
+        public Entry(String resourcePath, String[] segmentPaths, int[] segmentDurationsMillis,
                 int loopSegmentIndex) {
             if (resourcePath == null || resourcePath.length() == 0) throw new IllegalArgumentException("empty sound resource path");
             if (segmentPaths == null || segmentDurationsMillis == null
@@ -49,7 +49,7 @@ final class SoundIndex {
 
     private SoundIndex() {}
 
-    static void write(File file, List<Entry> entries) throws IOException {
+    public static void write(File file, List<Entry> entries) throws IOException {
         Map<Integer, String> hashes = new HashMap<Integer, String>();
         for (int i = 0; i < entries.size(); i++) {
             Entry entry = entries.get(i);
@@ -81,7 +81,7 @@ final class SoundIndex {
         System.out.println("SoundIndex: " + entries.size() + " sound duration entries");
     }
 
-    static int hash(String value) {
+    public static int hash(String value) {
         int hash = 0x811c9dc5;
         for (int i = 0; i < value.length(); i++) {
             hash ^= value.charAt(i) & 0xff;
