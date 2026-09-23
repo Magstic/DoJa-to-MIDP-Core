@@ -48,7 +48,11 @@ public abstract class Frame {
     /** MIDP host 從這兩個入口把按鍵事件送回遊戲 Frame。 */
     public void __midpKeyPressed(int keyCode) {}
     public void __midpKeyReleased(int keyCode) {}
+    public void __midpHidden() {}
     public void __midpPaint(javax.microedition.lcdui.Graphics g) {
         SoftKeys.paint(g, this, getWidth(), getHeight());
+    }
+    public void __midpPresentPaint(javax.microedition.lcdui.Graphics g) {
+        __midpPaint(g);
     }
 }

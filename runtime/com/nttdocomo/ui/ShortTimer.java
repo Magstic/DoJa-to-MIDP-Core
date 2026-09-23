@@ -95,7 +95,7 @@ public final class ShortTimer implements TimeKeeper, Runnable {
                 if (!running || disposed) return;
             }
 
-            canvas.processEvent(Display.TIMER_EXPIRED_EVENT, id);
+            canvas.__midpPostEventAndWait(Display.TIMER_EXPIRED_EVENT, id);
 
             synchronized (this) {
                 if (!repeat) {

@@ -63,6 +63,44 @@ public class Display {
         return DisplayMidletHolder.midlet;
     }
 
+    /** 供 DoJa 模態 UI 橋接層取得底層 MIDP Display。 */
+    static javax.microedition.lcdui.Display __midpDisplay() {
+        javax.microedition.midlet.MIDlet midlet = getMidlet();
+        return midlet == null ? null : javax.microedition.lcdui.Display.getDisplay(midlet);
+    }
+
+    /** 顯示 MIDP 文字編輯器，並以非同步方式回報 DoJa IME 的完成結果。 */
+    static void __midpStartIme(final Canvas owner, String initialText, int inputMode, int inputSize) {
+        final javax.microedition.lcdui.Display display = __midpDisplay();
+        if (display == null) {
+            Canvas.__midpPostImeEvent(owner, 1, initialText == null ? "" : initialText);
+            return;
+        }
+
+        final String initial = initialText == null ? "" : initialText;
+        int maxSize = inputSize > 0 ? inputSize : 256;
+        if (maxSize < initial.length()) maxSize = initial.length();
+
+        final javax.microedition.lcdui.Displayable previous = display.getCurrent();
+        final javax.microedition.lcdui.TextBox editor =
+                new javax.microedition.lcdui.TextBox("", initial, maxSize, javax.microedition.lcdui.TextField.ANY);
+        final javax.microedition.lcdui.Command ok =
+                new javax.microedition.lcdui.Command("OK", javax.microedition.lcdui.Command.OK, 1);
+        final javax.microedition.lcdui.Command cancel =
+                new javax.microedition.lcdui.Command("Cancel", javax.microedition.lcdui.Command.BACK, 2);
+        editor.addCommand(ok);
+        editor.addCommand(cancel);
+        editor.setCommandListener(new javax.microedition.lcdui.CommandListener() {
+            public void commandAction(javax.microedition.lcdui.Command command,
+                                      javax.microedition.lcdui.Displayable source) {
+                display.setCurrent(previous == null ? owner.__midpDisplayable() : previous);
+                if (command == ok) Canvas.__midpPostImeEvent(owner, 0, editor.getString());
+                else Canvas.__midpPostImeEvent(owner, 1, initial);
+            }
+        });
+        display.setCurrent(editor);
+    }
+
     /**
      * DoJa 保證圖片支援 256 階半透明（8bit alpha），但 MIDP 可能只支援 完全透明/不透明。
      * 筆記：請保持 package 的 private，不可令其暴露出放進 DoJa 的公開 API 裡。

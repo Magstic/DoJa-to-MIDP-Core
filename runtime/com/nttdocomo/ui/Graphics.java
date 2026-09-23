@@ -202,10 +202,10 @@ public class Graphics {
             if (lockCount == 0) return;
             if (forced) {
                 lockCount = 0;
-                present = parentCanvas != null;
+                present = parentCanvas != null && !parentCanvas.__midpIsPaintCallback();
             } else {
                 lockCount--;
-                present = lockCount == 0 && parentCanvas != null;
+                present = lockCount == 0 && parentCanvas != null && !parentCanvas.__midpIsPaintCallback();
             }
             if (present) presenting = true;
             notifyAll();
@@ -586,7 +586,7 @@ public class Graphics {
         if (outW <= 0 || outH <= 0 || sw <= 0 || sh <= 0) return;
         int imageAlpha = image.getAlpha();
         boolean colourKey = image.isTransparentEnabled();
-        int transparent = image.getTransparentColor() & 0x00ffffff;
+        int transparent = colourKey ? (image.getTransparentColor() & 0x00ffffff) : 0;
         boolean dither = sourceOverAlphaPath && imageAlpha < 255 && Image.shouldDitherAlpha();
         if (sw != dw || sh != dh || outW > COMPOSITE_PIXELS) {
             prepareScaleMaps(dw, dh, sw, sh);
@@ -817,7 +817,7 @@ public class Graphics {
         if (left >= right || top >= bottom) return;
 
         boolean colourKey = image.isTransparentEnabled();
-        int transparent = image.getTransparentColor() & 0x00FFFFFF;
+        int transparent = colourKey ? (image.getTransparentColor() & 0x00FFFFFF) : 0;
         prepareImageAlphaLuts(imageAlpha);
 
         int blockW = right - left;
@@ -993,7 +993,7 @@ public class Graphics {
     protected int prepareImagePixel(Image image, int pixel) {
         if (image == null) return 0;
         return applyImageAlpha(pixel, image.getAlpha(), image.isTransparentEnabled(),
-                image.getTransparentColor() & 0x00FFFFFF);
+                (image.isTransparentEnabled() ? image.getTransparentColor() : 0) & 0x00FFFFFF);
     }
 
 
