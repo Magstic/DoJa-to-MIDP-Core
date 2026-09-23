@@ -32,6 +32,8 @@ public class AudioPresenter extends MediaPresenter implements SoundPlayer.Listen
     private boolean sfxOutputEnabled = true;
     private int generation;
     private volatile boolean playing;
+    private boolean paused;
+    private int pausedMillis;
 
     private AudioPresenter(int port) {
         if (port < 0 || port >= PORT_COUNT) {
@@ -49,6 +51,8 @@ public class AudioPresenter extends MediaPresenter implements SoundPlayer.Listen
     /** 綁定並載入指定音效資源。設定前會先停止當前播放，若傳入資源不為 null 則會將其標記為使用中。 */
     public void setSound(MediaSound sound) {
         stop();
+        paused = false;
+        pausedMillis = 0;
         this.sound = sound;
         if (sound != null) sound.use();
     }
@@ -85,6 +89,8 @@ public class AudioPresenter extends MediaPresenter implements SoundPlayer.Listen
     public void play() { play(0); }
 
     public void play(int startMillis) {
+        paused = false;
+        pausedMillis = 0;
         int token = ++generation;
         if (!(sound instanceof SoundRes)) {
             playing = false;
@@ -100,10 +106,30 @@ public class AudioPresenter extends MediaPresenter implements SoundPlayer.Listen
         }
     }
 
+    public void pause() {
+        if (!playing) return;
+        pausedMillis = player.getCurrentTimeMillis(this, generation);
+        int token = generation;
+        playing = false;
+        paused = true;
+        player.stop(this, token);
+        generation++;
+    }
+
+    public void restart() {
+        if (!paused) return;
+        int startMillis = pausedMillis;
+        paused = false;
+        pausedMillis = 0;
+        play(startMillis);
+    }
+
     public void stop() {
         int token = generation;
         boolean notify = playing;
         playing = false;
+        paused = false;
+        pausedMillis = 0;
         player.stop(this, token);
         generation++;
         if (notify) fireMediaAction(AUDIO_STOPPED, 0);
