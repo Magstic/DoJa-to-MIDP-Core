@@ -20,6 +20,7 @@ public final class ConnectorProxy {
     private static final String RESOURCE_PREFIX = "resource:///";
     private static final String SCRATCHPAD_PREFIX = "scratchpad:///";
     private static final String SCRATCHPAD_META_RESOURCE = "/assets/sp/meta.bin";
+    private static final String SCRATCHPAD_PARTITIONS_RESOURCE = "/assets/sp/partitions.bin";
     private static final String ARCHIVE_INDEX_RESOURCE = "/assets/index.bin";
 
     private static final String RMS_NAME = "DoJaScratchpad";
@@ -35,6 +36,8 @@ public final class ConnectorProxy {
     private static int blockSize;
     private static int blockCount;
     private static byte[] blockPresent;
+    private static int[] scratchpadPartitionBase;
+    private static int[] scratchpadPartitionSize;
     private static int cachedBlock = -1;
     private static byte[] cachedBlockData;
 
@@ -123,6 +126,7 @@ public final class ConnectorProxy {
             if (value > 1) throw new IOException("invalid scratchpad block map");
             blockPresent[i] = (byte)value;
         }
+        loadScratchpadPartitions();
         scratchpadLoaded = true;
     }
 
@@ -170,10 +174,44 @@ public final class ConnectorProxy {
         return input;
     }
 
+    private static void loadScratchpadPartitions() throws IOException {
+        byte[] data = readResourceFully(SCRATCHPAD_PARTITIONS_RESOURCE);
+        if (data == null) throw new IOException("missing " + SCRATCHPAD_PARTITIONS_RESOURCE);
+        if (data.length < 6 || data[0] != 'S' || data[1] != 'P'
+                || data[2] != 'P' || data[3] != 'T') {
+            throw new IOException("invalid " + SCRATCHPAD_PARTITIONS_RESOURCE);
+        }
+        int count = readU16(data, 4);
+        if (count <= 0 || count > 16 || data.length != 6 + count * 4) {
+            throw new IOException("invalid scratchpad partition metadata");
+        }
+        scratchpadPartitionBase = new int[count];
+        scratchpadPartitionSize = new int[count];
+        int total = 0;
+        int p = 6;
+        for (int i = 0; i < count; i++) {
+            int size = readInt(data, p); p += 4;
+            if (size < 0 || size > scratchpadSize - total) {
+                throw new IOException("invalid scratchpad partition size");
+            }
+            scratchpadPartitionBase[i] = total;
+            scratchpadPartitionSize[i] = size;
+            total += size;
+        }
+        if (total != scratchpadSize) throw new IOException("scratchpad partition size mismatch");
+    }
+
     private static ScratchpadRange parseScratchpadRange(String uri) throws IOException {
         if (!isScratchpad(uri)) throw new IOException("not a scratchpad URI: " + uri);
         ensureScratchpadLoaded();
         String work = uri.substring(SCRATCHPAD_PREFIX.length());
+        int separator = work.indexOf(';');
+        String numberText = separator < 0 ? work : work.substring(0, separator);
+        int number = parseInt(numberText, -1);
+        if (number < 0 || number >= scratchpadPartitionSize.length) {
+            throw new IOException("bad scratchpad number " + number);
+        }
+
         int pos = 0, length = -1;
         int marker = work.indexOf(";pos=");
         if (marker >= 0) {
@@ -184,10 +222,12 @@ public final class ConnectorProxy {
             int lengthMarker = work.indexOf("length=", comma);
             if (lengthMarker >= 0) length = parseInt(work.substring(lengthMarker + 7), -1);
         }
-        if (pos < 0 || pos > scratchpadSize) throw new IOException("bad scratchpad position " + pos);
-        int available = scratchpadSize - pos;
-        if (length >= 0 && length > available) throw new IOException("bad scratchpad length " + length);
-        return new ScratchpadRange(pos, length);
+        int partitionSize = scratchpadPartitionSize[number];
+        if (pos < 0 || pos > partitionSize) throw new IOException("bad scratchpad position " + pos);
+        int available = partitionSize - pos;
+        if (length < 0) length = available;
+        if (length > available) throw new IOException("bad scratchpad length " + length);
+        return new ScratchpadRange(scratchpadPartitionBase[number] + pos, length);
     }
 
     private static int parseInt(String value, int fallback) {
