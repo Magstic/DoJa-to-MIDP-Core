@@ -19,7 +19,7 @@ final class ShiftJisTable {
         if (renderGlyphs == null) throw new NullPointerException("renderGlyphs");
         if (codes.size() > 65535) throw new IOException("Shift-JIS mapping count overflow: " + codes.size());
 
-        Charset charset = findCharset();
+        Charset charset = charset();
         ByteArrayOutputStream bytes = new ByteArrayOutputStream(6 + codes.size() * 4);
         DataOutputStream out = new DataOutputStream(bytes);
         out.writeBytes("SMP1");
@@ -40,7 +40,7 @@ final class ShiftJisTable {
         return codes.size();
     }
 
-    private static Charset findCharset() {
+    static Charset charset() {
         String[] names = { "windows-31j", "MS932", "Shift_JIS" };
         for (int i = 0; i < names.length; i++) {
             try { return Charset.forName(names[i]); }

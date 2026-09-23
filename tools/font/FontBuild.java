@@ -5,6 +5,8 @@ import doja.tools.io.FileIO;
 import java.awt.Font;
 import java.io.File;
 import java.io.IOException;
+import java.util.Collections;
+import java.util.TreeSet;
 
 /** 根據使用字形的多少，建立『渲染字形』與『Shift-JIS 解碼器』資源。 */
 public final class FontBuild {
@@ -27,9 +29,22 @@ public final class FontBuild {
         FileIO.ensureDirectory(outDir);
 
         Font font = FontFiles.load(fontFile).deriveFont((float)PIXEL_SIZE);
-        FontUsageCollector.Result usage = FontUsageCollector.collect(sourceDirs);
-        int sjisCount = ShiftJisTable.write(usage.shiftJisCodes, new File(outDir, "sjis_map.bin"), usage.glyphs);
-        int glyphCount = BitmapFontWriter.write(font, usage.glyphs, new File(outDir, "glyphs.bin"));
+        TreeSet<Integer> glyphs;
+        TreeSet<Integer> shiftJisCodes;
+        try {
+            FontUsageCollector.Result usage = FontUsageCollector.collect(sourceDirs);
+            glyphs = usage.glyphs;
+            shiftJisCodes = usage.shiftJisCodes;
+        } catch (IOException noManifest) {
+            if (noManifest.getMessage() == null || noManifest.getMessage().indexOf("no font-usage.bin") < 0) {
+                throw noManifest;
+            }
+            glyphs = FontSourceScanner.collect(font, Collections.<Integer,Integer>emptyMap(), sourceDirs);
+            shiftJisCodes = new TreeSet<Integer>();
+            System.out.println("FontBuild: no font-usage.bin; scanned source resources directly");
+        }
+        int sjisCount = ShiftJisTable.write(shiftJisCodes, new File(outDir, "sjis_map.bin"), glyphs);
+        int glyphCount = BitmapFontWriter.write(font, glyphs, new File(outDir, "glyphs.bin"));
         System.out.println("FontBuild: " + fontFile.getName() + ", glyphs=" + glyphCount + ", sjis=" + sjisCount);
     }
 }
