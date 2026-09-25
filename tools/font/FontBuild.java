@@ -43,8 +43,20 @@ public final class FontBuild {
             shiftJisCodes = new TreeSet<Integer>();
             System.out.println("FontBuild: no font-usage.bin; scanned source resources directly");
         }
+        addDefaultEnglish(glyphs, shiftJisCodes);
         int sjisCount = ShiftJisTable.write(shiftJisCodes, new File(outDir, "sjis_map.bin"), glyphs);
         int glyphCount = BitmapFontWriter.write(font, glyphs, new File(outDir, "glyphs.bin"));
         System.out.println("FontBuild: " + fontFile.getName() + ", glyphs=" + glyphCount + ", sjis=" + sjisCount);
+    }
+
+    private static void addDefaultEnglish(TreeSet<Integer> glyphs, TreeSet<Integer> shiftJisCodes) {
+        for (int i = 0; i < 26; i++) {
+            glyphs.add(Integer.valueOf('A' + i));
+            glyphs.add(Integer.valueOf('a' + i));
+            glyphs.add(Integer.valueOf(0xFF21 + i));
+            glyphs.add(Integer.valueOf(0xFF41 + i));
+            shiftJisCodes.add(Integer.valueOf(0x8260 + i));
+            shiftJisCodes.add(Integer.valueOf(0x8281 + i));
+        }
     }
 }
